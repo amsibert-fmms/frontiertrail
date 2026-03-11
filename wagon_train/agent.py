@@ -155,7 +155,8 @@ class Agent:
             return self._leader_decision(world)
 
         # Generic decision based on traits
-        return self._generic_decision(world)
+        base_action = self._generic_decision(world)
+        return self._apply_progress_bias(world, base_action)
 
     def _leader_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
         from .decisions import Action
@@ -168,7 +169,9 @@ class Agent:
             if self.traits.risk_tolerance >= 0.5:
                 return Action.FORD_RIVER
             return Action.REST  # wait and assess
-        return Action.TRAVEL
+        # Leaders now also apply the same strategic pacing check so their
+        # vote can push the group out of passive loops when behind schedule.
+        return self._apply_progress_bias(world, Action.TRAVEL)
 
     def _generic_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
         from .decisions import Action
@@ -193,6 +196,60 @@ class Agent:
         if self._morale < 30:
             return Action.REST
         return Action.TRAVEL
+
+    def _critical_survival_state(self, world: "WagonTrain") -> bool:
+        """Return True when survival needs are urgent enough to override pacing.
+
+        In simple words: if we are in immediate danger, we should stabilize first.
+        """
+        return (
+            self._health < 35
+            or self._hunger > 80
+            or world.food_supply < 12
+            or world.wagon_parts < 15
+            or world.sickness_count > 2
+        )
+
+    def _action_score(self, world: "WagonTrain", action: "Action") -> float:  # noqa: F821
+        """Score an action with a lightweight progress/survival/risk heuristic.
+
+        Higher score is better for the current situation.
+        """
+        from .decisions import Action
+
+        progress_urgency = world.miles_needed_per_remaining_day
+        score_map = {
+            Action.TRAVEL: 5.0 + min(8.0, progress_urgency * 0.8),
+            Action.REST: 2.0 + (4.0 if self._health < 50 else 0.0),
+            Action.HUNT: 2.5 + (4.5 if world.food_supply < 25 else 0.0),
+            Action.REPAIR_WAGON: 2.5 + (4.0 if world.wagon_parts < 30 else 0.0),
+            Action.RATION_FOOD: 1.5 + (3.5 if world.food_supply < 20 else 0.0),
+            Action.FORD_RIVER: 4.0 + (2.0 if world.river_ahead else -3.0),
+        }
+        return score_map[action]
+
+    def _apply_progress_bias(self, world: "WagonTrain", base_action: "Action") -> "Action":  # noqa: F821
+        """Bias choices toward travel when schedule pressure is high.
+
+        This avoids the party repeatedly selecting maintenance actions while
+        quietly running out of days to finish the journey.
+        """
+        from .decisions import Action
+
+        if self._critical_survival_state(world):
+            return base_action
+
+        # If a river is ahead, "progress bias" means preferring to ford,
+        # because travel itself cannot proceed until the crossing is resolved.
+        must_travel_threshold = world.REQUIRED_MILES_PER_DAY * 1.2
+        behind_schedule = world.miles_needed_per_remaining_day >= must_travel_threshold
+        if not behind_schedule:
+            return base_action
+
+        preferred_progress_action = Action.FORD_RIVER if world.river_ahead else Action.TRAVEL
+        if self._action_score(world, preferred_progress_action) >= self._action_score(world, base_action):
+            return preferred_progress_action
+        return base_action
 
     # ------------------------------------------------------------------
     # Repr

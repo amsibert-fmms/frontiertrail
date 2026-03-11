@@ -107,6 +107,16 @@ class TestAgent:
         action = a.propose_action(world)
         assert action == Action.REPAIR_WAGON
 
+    def test_progress_bias_prefers_travel_when_behind_schedule(self):
+        # When the group is very behind schedule and not in emergency survival
+        # territory, normal passengers should lean toward progress actions.
+        world = WagonTrain()
+        world.day = 150
+        world.miles_traveled = 500.0
+        a = Agent("Traveler", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5), morale=60.0)
+        action = a.propose_action(world)
+        assert action == Action.TRAVEL
+
 
 # ---------------------------------------------------------------------------
 # World / WagonTrain tests
@@ -168,6 +178,12 @@ class TestWagonTrain:
         world = WagonTrain(weather=Weather.STORMY)
         assert world.travel_modifier < 1.0
 
+    def test_miles_needed_per_remaining_day_is_positive(self):
+        world = WagonTrain()
+        world.day = 100
+        world.miles_traveled = 900
+        assert world.miles_needed_per_remaining_day > 0
+
 
 # ---------------------------------------------------------------------------
 # Decision engine tests
@@ -223,6 +239,22 @@ class TestDecisionEngine:
         engine.apply_action(Action.HUNT, party, world)
         # Food may increase or not — just ensure it doesn't go negative
         assert world.food_supply >= 0.0
+
+    def test_hunt_failure_still_adds_small_food(self, monkeypatch):
+        # Force hunt failure and verify consolation foraging food is added.
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.weather = Weather.SUNNY
+        party = [Agent("Hunter", Role.HUNTER, Traits())]
+        before_food = world.food_supply
+
+        # First random.random call in _do_hunt decides success/failure.
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        engine.apply_action(Action.HUNT, party, world)
+
+        # Even after daily food consumption, failed hunts should not produce
+        # a net catastrophic food drop from zero gain; foraging adds some food.
+        assert world.food_supply > before_food - 2.0
 
     def test_repair_increases_parts(self):
         engine = DecisionEngine()

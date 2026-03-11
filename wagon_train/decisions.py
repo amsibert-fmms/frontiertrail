@@ -26,7 +26,9 @@ class Action(str, Enum):
 # ------------------------------------------------------------------
 
 # Miles gained per travel day (base)
-TRAVEL_BASE_MILES = 20.0
+# We intentionally increased this baseline so that, after accounting for
+# non-travel days, weather, and setbacks, successful runs are actually feasible.
+TRAVEL_BASE_MILES = 32.0
 
 # Food consumed per person per day baseline
 FOOD_PER_PERSON_PER_DAY = 1.5
@@ -34,6 +36,9 @@ FOOD_PER_PERSON_PER_DAY = 1.5
 # Food gained from a successful hunt (base range)
 HUNT_FOOD_MIN = 30.0
 HUNT_FOOD_MAX = 70.0
+# If hunting fails, the party can still forage a small amount.
+HUNT_FOOD_FAIL_MIN = 5.0
+HUNT_FOOD_FAIL_MAX = 12.0
 
 # Parts restored by a repair action
 REPAIR_PARTS_RESTORE = 20.0
@@ -42,11 +47,11 @@ REPAIR_PARTS_RESTORE = 20.0
 RATION_CONSUMPTION_FACTOR = 0.4   # 40 % of normal consumption
 
 # Health cost of fording a river (base range per person)
-FORD_HEALTH_COST_MIN = 5.0
-FORD_HEALTH_COST_MAX = 25.0
+FORD_HEALTH_COST_MIN = 4.0
+FORD_HEALTH_COST_MAX = 15.0
 
 # Miles gained when fording
-FORD_MILES = 5.0
+FORD_MILES = 12.0
 
 
 class DecisionEngine:
@@ -131,8 +136,11 @@ class DecisionEngine:
             return msgs
 
         modifier = world.travel_modifier
-        # Wagon-parts penalty
-        parts_factor = min(1.0, world.wagon_parts / 50.0)
+        # Wagon-parts factor:
+        # - Old model punished low parts very harshly.
+        # - New model keeps a floor so the party is slowed, not frozen.
+        # - We also cap top-end bonus to keep things predictable.
+        parts_factor = min(1.2, 0.5 + world.wagon_parts / 100.0)
         miles = TRAVEL_BASE_MILES * modifier * parts_factor
         miles *= random.uniform(0.8, 1.2)  # ±20% random variation
         world.miles_traveled += miles
@@ -162,17 +170,38 @@ class DecisionEngine:
         # Find the best hunter(s)
         from .agent import Role
         hunters = [a for a in living if a.role == Role.HUNTER]
-        skill = len(hunters) * 0.3 + 0.4  # baseline success chance
-        success_chance = min(0.95, skill)
+        # Hunting success model:
+        # - still rewards having hunters,
+        # - but no near-guaranteed outcomes with a small number of specialists.
+        skill = 0.3 + len(hunters) * 0.2
+        success_chance = min(0.9, skill)
+
+        # Weather affects hunt reliability and yields.
+        # Bad weather means less activity/visibility and harder tracking.
+        weather_hunt_factor = {
+            "sunny": 1.0,
+            "cloudy": 0.95,
+            "hot": 0.9,
+            "rainy": 0.8,
+            "snowy": 0.75,
+            "stormy": 0.6,
+        }[world.weather.value]
+        success_chance *= weather_hunt_factor
 
         if random.random() < success_chance:
-            food_gained = random.uniform(HUNT_FOOD_MIN, HUNT_FOOD_MAX)
+            food_gained = random.uniform(HUNT_FOOD_MIN, HUNT_FOOD_MAX) * weather_hunt_factor
             world.food_supply += food_gained
             msgs.append(f"The hunt is successful! +{food_gained:.1f} lbs of food.")
             for agent in living:
                 agent.morale = min(100.0, agent.morale + 3.0)
         else:
-            msgs.append("The hunting party returns empty-handed.")
+            # Even on a "failed" hunt, basic foraging usually finds something.
+            consolation_food = random.uniform(HUNT_FOOD_FAIL_MIN, HUNT_FOOD_FAIL_MAX)
+            world.food_supply += consolation_food
+            msgs.append(
+                "The hunting party has little luck, "
+                f"but foraging adds +{consolation_food:.1f} lbs of food."
+            )
             for agent in living:
                 agent.morale = max(0.0, agent.morale - 2.0)
         return msgs
@@ -236,6 +265,9 @@ class DecisionEngine:
             msgs.append("The party fords the river safely!")
             for agent in living:
                 agent.morale = min(100.0, agent.morale + 5.0)
+            # Safe crossing can also improve confidence and preserve equipment.
+            world.morale = min(100.0, world.morale + 3.0)
+            world.wagon_parts = min(100.0, world.wagon_parts + 2.0)
 
         world.miles_traveled += FORD_MILES
         world.river_crossed()

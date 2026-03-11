@@ -168,8 +168,63 @@ EVENT_CATALOGUE: List[dict] = [
 class EventSystem:
     """Generates and applies random events each day."""
 
-    # Probability that any event occurs on a given day
-    BASE_EVENT_CHANCE = 0.35
+    # Probability that any event occurs on a given day.
+    # Lower than before to reduce relentless stacking penalties.
+    BASE_EVENT_CHANCE = 0.22
+
+    def __init__(self) -> None:
+        # Keep a tiny bit of memory so event selection can avoid
+        # repetitive severe punishment streaks.
+        self._last_event_severity: str = "neutral"
+
+    def _event_severity(self, event_data: dict) -> str:
+        """Classify an event into a rough severity tier.
+
+        This is intentionally simple and transparent, so balancing is easy.
+        """
+        total_delta = (
+            event_data.get("food_delta", 0)
+            + event_data.get("parts_delta", 0)
+            + event_data.get("health_delta", 0)
+            + event_data.get("morale_delta", 0)
+            + event_data.get("miles_delta", 0)
+        )
+        if total_delta <= -25 or event_data.get("sickness"):
+            return "severe_negative"
+        if total_delta < 0:
+            return "mild_negative"
+        if total_delta > 10:
+            return "positive"
+        return "neutral"
+
+    def _event_weight(self, severity: str) -> float:
+        """Return sampling weight by severity category."""
+        weights = {
+            "neutral": 1.2,
+            "mild_negative": 1.0,
+            "severe_negative": 0.35,
+            "positive": 0.9,
+        }
+        return weights[severity]
+
+    def _choose_event(self) -> dict:
+        """Pick an event using weighted severity and anti-streak logic."""
+        weighted_events = []
+        weighted_values = []
+        for event in EVENT_CATALOGUE:
+            severity = self._event_severity(event)
+            # Anti-streak protection: if yesterday was severe negative,
+            # strongly suppress severe negatives today.
+            anti_streak_factor = 0.2 if (
+                self._last_event_severity == "severe_negative"
+                and severity == "severe_negative"
+            ) else 1.0
+            weighted_events.append(event)
+            weighted_values.append(self._event_weight(severity) * anti_streak_factor)
+
+        chosen = random.choices(weighted_events, weights=weighted_values, k=1)[0]
+        self._last_event_severity = self._event_severity(chosen)
+        return chosen
 
     def roll(self, world: "WagonTrain", agents: List["Agent"]) -> List[str]:
         """Potentially trigger a random event; return list of messages."""
@@ -178,7 +233,7 @@ class EventSystem:
         if random.random() > self.BASE_EVENT_CHANCE:
             return messages  # No event today
 
-        event_data = random.choice(EVENT_CATALOGUE)
+        event_data = self._choose_event()
         messages.append(f"[EVENT] {event_data['name']}: {event_data['description']}")
 
         living = [a for a in agents if a.alive]

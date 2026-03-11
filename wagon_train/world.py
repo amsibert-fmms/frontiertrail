@@ -66,6 +66,10 @@ class WagonTrain:
 
     GOAL_MILES = 2000
     MAX_DAYS = 200
+    # This is a small quality-of-life helper for planning decisions:
+    # if we know our goal and max days, we can estimate whether we are
+    # "on pace" or "behind pace" as the trip unfolds.
+    REQUIRED_MILES_PER_DAY = GOAL_MILES / MAX_DAYS
 
     def __init__(
         self,
@@ -116,12 +120,15 @@ class WagonTrain:
         self._days_until_river -= 1
         self.river_ahead = self._days_until_river <= 0
 
-        # Natural food spoilage (0.3–1.0 units per day)
-        spoilage = random.uniform(0.3, 1.0)
+        # Natural food spoilage each day.
+        # We softened this range so the party is still under pressure,
+        # but the simulation is less dominated by unavoidable attrition.
+        spoilage = random.uniform(0.2, 0.7)
         self.food_supply = max(0.0, self.food_supply - spoilage)
 
-        # Wagon wear (0–1 unit per day)
-        wear = random.uniform(0.0, 1.0)
+        # Wagon wear from terrain and normal use.
+        # This was also softened to reduce extreme compounding slowdowns.
+        wear = random.uniform(0.0, 0.7)
         self.wagon_parts = max(0.0, self.wagon_parts - wear)
 
         # Clear today's sickness events (illness resolved or carried over)
@@ -143,6 +150,17 @@ class WagonTrain:
             f"Food: {self.food_supply:>5.1f} | Parts: {self.wagon_parts:>5.1f} | "
             f"Weather: {self.weather.value:<7} | Morale: {self.morale:>4.0f}{river_str}"
         )
+
+    @property
+    def miles_needed_per_remaining_day(self) -> float:
+        """Return the pace needed from now to reach the goal in time.
+
+        Think of this like a "speedometer target": if this value gets high,
+        the group should prioritize progress unless survival is in immediate danger.
+        """
+        remaining_days = max(1, self.MAX_DAYS - self.day)
+        remaining_miles = max(0.0, self.GOAL_MILES - self.miles_traveled)
+        return remaining_miles / remaining_days
 
     def __repr__(self) -> str:
         return (
