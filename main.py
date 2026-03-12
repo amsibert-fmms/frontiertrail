@@ -6,12 +6,11 @@ Usage:
 """
 
 import argparse
-import sys
 
 from wagon_train.simulation import Simulation, build_default_party
 
 
-def _prompt_party_size(default_size: int) -> int:
+def _prompt_party_size(min_size: int, max_size: int, default_size: int) -> int:
     """Ask the user how many people should be in the party.
 
     This prompt is intentionally resilient:
@@ -22,7 +21,7 @@ def _prompt_party_size(default_size: int) -> int:
     while True:
         try:
             raw = input(
-                f"How many people should be in the party? [1-{default_size}] "
+                f"How many people should be in the party? [{min_size}-{max_size}] "
                 f"(Enter for {default_size}): "
             ).strip()
         except EOFError:
@@ -33,10 +32,10 @@ def _prompt_party_size(default_size: int) -> int:
 
         if raw.isdigit():
             value = int(raw)
-            if 1 <= value <= default_size:
+            if min_size <= value <= max_size:
                 return value
 
-        print(f"Please enter a whole number from 1 to {default_size}.")
+        print(f"Please enter a whole number from {min_size} to {max_size}.")
 
 
 def main() -> None:
@@ -58,18 +57,19 @@ def main() -> None:
         "--party-size",
         type=int,
         default=None,
-        help="Party size to use (1-10). If omitted, you will be prompted.",
+        help="Party size to use (10-20). If omitted, you will be prompted.",
     )
     args = parser.parse_args()
 
     default_party = build_default_party()
+    min_party_size = 10
     max_party_size = len(default_party)
 
     if args.party_size is None:
-        party_size = _prompt_party_size(max_party_size)
+        party_size = _prompt_party_size(min_party_size, max_party_size, min_party_size)
     else:
-        if not (1 <= args.party_size <= max_party_size):
-            parser.error(f"--party-size must be between 1 and {max_party_size}")
+        if not (min_party_size <= args.party_size <= max_party_size):
+            parser.error(f"--party-size must be between {min_party_size} and {max_party_size}")
         party_size = args.party_size
 
     # Keep role diversity from the curated roster by taking the first N members.
