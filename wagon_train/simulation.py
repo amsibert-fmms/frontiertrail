@@ -130,6 +130,24 @@ class Simulation:
             outcomes = self.engine.apply_action(winning_action, self.agents, self.world)
             self.logger.log_outcomes(outcomes)
 
+            # 7. Route-decision checkpoint at Soda Springs.
+            # ELI5: once we reach Soda Springs, everyone votes for Oregon,
+            # California, or a split. If split wins, we keep following the
+            # more-influential group.
+            if self.world.needs_trail_choice:
+                chosen_route, trail_tally, trail_msg = self.engine.resolve_trail_choice(
+                    living,
+                    self.world,
+                )
+                self.world.apply_trail_choice(chosen_route)
+                self.logger.log_outcomes([
+                    "Trail vote tally: "
+                    + ", ".join(
+                        f"{option}={weight:.2f}" for option, weight in sorted(trail_tally.items())
+                    ),
+                    trail_msg,
+                ])
+
             # 8. Record non-negative net progress for the entire day
             # (events + chosen action combined).
             self.world.record_daily_progress(self.world.miles_traveled - day_start_miles)
@@ -139,8 +157,9 @@ class Simulation:
 
         # Determine end reason
         if self.world.miles_traveled >= self.world.GOAL_MILES:
+            destination_label = self.world.active_stops[-1]["name"]
             reason = (
-                f"Oregon reached after {self.world.day} days! "
+                f"{destination_label} reached after {self.world.day} days! "
                 f"({sum(1 for a in self.agents if a.alive)} survivors)"
             )
         else:

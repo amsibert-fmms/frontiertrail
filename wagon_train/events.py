@@ -40,7 +40,9 @@ EVENT_CATALOGUE: List[dict] = [
         "description": "Several party members fall ill with dysentery.",
         "food_delta": 0,
         "parts_delta": 0,
-        "health_delta": -15,
+        # ELI5: historical dysentery was one of the deadliest trail illnesses,
+        # so this event now carries a much heavier health impact.
+        "health_delta": -26,
         "morale_delta": -10,
         "sickness": True,
     },
@@ -58,7 +60,8 @@ EVENT_CATALOGUE: List[dict] = [
         "description": "A violent thunderstorm batters the wagon train overnight.",
         "food_delta": -10,
         "parts_delta": -10,
-        "health_delta": -5,
+        # ELI5: severe storms could cause exposure/injury beyond light bruises.
+        "health_delta": -6,
         "morale_delta": -8,
         "sickness": False,
     },
@@ -99,7 +102,8 @@ EVENT_CATALOGUE: List[dict] = [
         "description": "A traveler is bitten by a rattlesnake.",
         "food_delta": 0,
         "parts_delta": 0,
-        "health_delta": -20,
+        # ELI5: serious venomous bites were frequently life-threatening.
+        "health_delta": -26,
         "morale_delta": -8,
         "sickness": True,
         "target": "random",
@@ -109,7 +113,7 @@ EVENT_CATALOGUE: List[dict] = [
         "description": "Large hailstones damage the wagon canvas and frighten the animals.",
         "food_delta": -5,
         "parts_delta": -8,
-        "health_delta": -3,
+        "health_delta": -4,
         "morale_delta": -5,
         "sickness": False,
     },
@@ -136,7 +140,8 @@ EVENT_CATALOGUE: List[dict] = [
         "description": "The wagon nearly tips during a river crossing.",
         "food_delta": -10,
         "parts_delta": -15,
-        "health_delta": -10,
+        # ELI5: drowning/trauma risk at crossings was a major death source.
+        "health_delta": -17,
         "morale_delta": -10,
         "sickness": False,
     },
@@ -164,9 +169,49 @@ EVENT_CATALOGUE: List[dict] = [
         "description": "The party passes near contaminated water; several become ill.",
         "food_delta": 0,
         "parts_delta": 0,
-        "health_delta": -20,
+        # ELI5: cholera outbreaks could devastate wagon parties rapidly.
+        "health_delta": -32,
         "morale_delta": -12,
         "sickness": True,
+    },
+    {
+        "name": "Trailside Warning Markers",
+        "description": (
+            "Fresh warnings from travelers ahead mark bad water and recent sickness"
+            " campsites along the next stretch."
+        ),
+        "food_delta": 0,
+        "parts_delta": 0,
+        "health_delta": 0,
+        "morale_delta": 4,
+        "sickness": False,
+        "warning_markers": True,
+    },
+    {
+        "name": "Inaccurate Guidebook",
+        "description": (
+            "A guidebook shortcut proves unreliable, costing time and supplies"
+            " before the party regroups on the main trail."
+        ),
+        "food_delta": -12,
+        "parts_delta": 0,
+        "health_delta": -2,
+        "morale_delta": -7,
+        "sickness": False,
+        "miles_delta": -8,
+    },
+    {
+        "name": "New Ferry and Bridge Crossing",
+        "description": (
+            "A newer ferry/bridge crossing allows safer passage and boosts"
+            " confidence in upcoming river decisions."
+        ),
+        "food_delta": -5,
+        "parts_delta": 0,
+        "health_delta": 0,
+        "morale_delta": 6,
+        "sickness": False,
+        "crossing_safety": True,
     },
 ]
 
@@ -235,6 +280,30 @@ class EventSystem:
         self._last_event_severity = self._event_severity(chosen)
         return chosen
 
+    def _apply_warning_filters(self, world: "WagonTrain", event_data: dict) -> dict:
+        """Apply temporary warning/safety mitigations to selected event data.
+
+        ELI5:
+        - Warning markers reduce sickness severity/frequency for a short time.
+        - Crossing-safety effects soften rough-river consequences.
+        """
+        adjusted = dict(event_data)
+
+        if world.disease_warning_days > 0 and adjusted.get("sickness"):
+            # Warnings do not guarantee safety, but they reduce impact.
+            # ELI5: warnings help, but they cannot fully prevent exposure.
+            adjusted["health_delta"] = int(adjusted.get("health_delta", 0) * 0.76)
+            adjusted["morale_delta"] = int(adjusted.get("morale_delta", 0) * 0.8)
+            adjusted["description"] = (
+                f"{adjusted['description']} (warnings helped the party avoid the worst exposure.)"
+            )
+
+        if world.crossing_safety_days > 0 and "River Crossing" in adjusted.get("name", ""):
+            adjusted["health_delta"] = int(adjusted.get("health_delta", 0) * 0.7)
+            adjusted["parts_delta"] = int(adjusted.get("parts_delta", 0) * 0.7)
+
+        return adjusted
+
     def roll(self, world: "WagonTrain", agents: List["Agent"]) -> List[str]:
         """Potentially trigger a random event; return list of messages."""
         messages: List[str] = []
@@ -243,6 +312,7 @@ class EventSystem:
             return messages  # No event today
 
         event_data = self._choose_event()
+        event_data = self._apply_warning_filters(world, event_data)
         messages.append(f"[EVENT] {event_data['name']}: {event_data['description']}")
 
         living = [a for a in agents if a.alive]
@@ -329,6 +399,16 @@ class EventSystem:
         # Record sickness
         if event_data.get("sickness"):
             world.sickness_events.append(event_data["name"])
+
+        # Traveler-to-traveler warning system about disease/bad water.
+        if event_data.get("warning_markers"):
+            world.disease_warning_days = max(world.disease_warning_days, 6)
+            messages.append("  Trail warnings noted: disease risk awareness improves for several days.")
+
+        # Improved crossing infrastructure discovered.
+        if event_data.get("crossing_safety"):
+            world.crossing_safety_days = max(world.crossing_safety_days, 5)
+            messages.append("  Safer crossing intel secured: river approaches should be less risky soon.")
 
         # Assign urgent wagon-repair responsibility on breakage events.
         # We prefer mechanics when possible; otherwise pick a random living traveler.

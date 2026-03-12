@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 # - It makes "How far have we gone?" comparisons super easy.
 # - It also makes the finish-line math explicit and readable.
 # - We can still derive per-segment distances when we need them.
-TRAIL_STOPS: List[dict[str, object]] = [
+OREGON_TRAIL_STOPS: List[dict[str, object]] = [
     {"name": "Independence, Missouri", "distance": 0},
     {"name": "Kansas River Crossing", "distance": 102, "river": True},
     {"name": "Big Blue River Crossing", "distance": 185, "river": True},
@@ -48,24 +48,54 @@ TRAIL_STOPS: List[dict[str, object]] = [
     {"name": "Oregon City / Willamette Valley", "distance": 2040},
 ]
 
+# ELI5: California travelers follow the same trail until Soda Springs, then
+# branch south-west toward California.
+CALIFORNIA_TRAIL_STOPS: List[dict[str, object]] = [
+    {"name": "Independence, Missouri", "distance": 0},
+    {"name": "Kansas River Crossing", "distance": 102, "river": True},
+    {"name": "Big Blue River Crossing", "distance": 185, "river": True},
+    {"name": "Fort Kearny", "distance": 320, "fort": True},
+    {"name": "Platte River Valley", "distance": 350},
+    {"name": "Ash Hollow", "distance": 460},
+    {"name": "Chimney Rock", "distance": 520, "landmark": True},
+    {"name": "Scotts Bluff", "distance": 560, "landmark": True},
+    {"name": "Fort Laramie", "distance": 640, "fort": True},
+    {"name": "North Platte River Crossing", "distance": 700, "river": True},
+    {"name": "Register Cliff", "distance": 750},
+    {"name": "Independence Rock", "distance": 830, "landmark": True},
+    {"name": "Devil's Gate", "distance": 850, "landmark": True},
+    {"name": "South Pass (Continental Divide)", "distance": 932, "landmark": True},
+    {"name": "Green River Crossing", "distance": 989, "river": True},
+    {"name": "Fort Bridger", "distance": 1020, "fort": True},
+    {"name": "Soda Springs", "distance": 1180},
+    {"name": "Bear River Divide", "distance": 1260, "landmark": True},
+    {"name": "Great Salt Lake Desert", "distance": 1420, "landmark": True},
+    {"name": "Humboldt River Crossing", "distance": 1560, "river": True},
+    {"name": "Donner Pass (Sierra Nevada)", "distance": 1880, "landmark": True},
+    {"name": "Sutter's Fort / Sacramento Valley", "distance": 2040, "fort": True},
+]
 
-def _build_landmark_graph_from_stops() -> Dict[str, Dict[str, List[Tuple[str, int]] | int]]:
+# Backward-compatible alias used across tests and tooling.
+TRAIL_STOPS = OREGON_TRAIL_STOPS
+
+
+def _build_landmark_graph_from_stops(stops: List[dict[str, object]]) -> Dict[str, Dict[str, List[Tuple[str, int]] | int]]:
     """Build a single-path landmark graph from the ordered stop list.
 
     ELI5: we convert the checklist into linked "next stop" hops,
     where each hop stores the miles between neighboring stops.
     """
     graph: Dict[str, Dict[str, List[Tuple[str, int]] | int]] = {}
-    for index, stop in enumerate(TRAIL_STOPS):
+    for index, stop in enumerate(stops):
         name = str(stop["name"])
         distance = int(stop["distance"])
 
         # Last stop has no "next" hop.
-        if index == len(TRAIL_STOPS) - 1:
+        if index == len(stops) - 1:
             graph[name] = {"distance": distance, "next": []}
             continue
 
-        next_stop = TRAIL_STOPS[index + 1]
+        next_stop = stops[index + 1]
         next_name = str(next_stop["name"])
         next_distance = int(next_stop["distance"])
 
@@ -78,7 +108,8 @@ def _build_landmark_graph_from_stops() -> Dict[str, Dict[str, List[Tuple[str, in
 
 # This mirrors the original graph-style format, but now it is generated from
 # the ordered source-of-truth stop list above.
-LANDMARKS = _build_landmark_graph_from_stops()
+LANDMARKS = _build_landmark_graph_from_stops(TRAIL_STOPS)
+CALIFORNIA_LANDMARKS = _build_landmark_graph_from_stops(CALIFORNIA_TRAIL_STOPS)
 
 
 def _distance_to_destination(start: str, destination: str) -> int:
@@ -103,6 +134,9 @@ TRAIL_DESTINATION = str(TRAIL_STOPS[-1]["name"])
 # ELI5: these are like indexes in a book so we can find stop details fast.
 STOP_BY_NAME: Dict[str, dict[str, object]] = {
     str(stop["name"]): stop for stop in TRAIL_STOPS
+}
+CALIFORNIA_STOP_BY_NAME: Dict[str, dict[str, object]] = {
+    str(stop["name"]): stop for stop in CALIFORNIA_TRAIL_STOPS
 }
 
 # Food consumed per person per day (shared constant used by agents and decisions)
@@ -173,10 +207,22 @@ class WagonTrain:
     # if we know our goal and max days, we can estimate whether we are
     # "on pace" or "behind pace" as the trip unfolds.
     REQUIRED_MILES_PER_DAY = GOAL_MILES / MAX_DAYS
-    START_MONTH = 3
+    # ELI5: historical parties usually left in April or May to avoid early
+    # storms and still have enough grass for draft animals along the trail.
+    START_MONTH_OPTIONS = (4, 5)
     START_DAY = 1
-    START_YEAR_MIN = 1840
+    START_YEAR_MIN = 1841
     START_YEAR_MAX = 1860
+    START_YEAR_WEIGHTS: dict[int, int] = {
+        1841: 2,
+        1843: 4,
+        1847: 5,
+        1848: 6,
+        1849: 10,
+        1850: 9,
+        1851: 6,
+        1852: 8,
+    }
 
     def __init__(
         self,
@@ -189,6 +235,7 @@ class WagonTrain:
         mule_count: int = 2,
         weather: Weather = Weather.SUNNY,
         start_year: int | None = None,
+        start_month: int | None = None,
     ) -> None:
         self.day: int = 0
         self.miles_traveled: float = 0.0
@@ -220,30 +267,99 @@ class WagonTrain:
         self.river_ahead: bool = False
         self._days_until_river: int = random.randint(5, 15)
         self._event_log: List[str] = []    # events that happened today
+        # ELI5: warning markers left by earlier travelers can help us avoid
+        # disease hotspots and bad water for a short time.
+        self.disease_warning_days: int = 0
+        # ELI5: some stretches have newer bridges/ferries; this temporary bonus
+        # lowers river danger for a few days when discovered.
+        self.crossing_safety_days: int = 0
 
         # Derived-metric support
         self.living_count: int = 0         # updated by simulation each day
         self.avg_health: float = 100.0     # updated by decision engine each day
         self._recent_miles: List[float] = []  # rolling buffer of daily travel miles
         # Calendar model for log readability:
-        # - Every run starts on March 1st (as requested).
+        # - Every run starts on April 1st or May 1st to reflect common
+        #   historical departure windows.
         # - The year is intentionally randomized to keep each run feeling like
         #   a distinct historical departure while staying in the requested era.
         # - `start_year` is optional so tests/harnesses can force determinism.
         resolved_year = (
             start_year
             if start_year is not None
-            else random.randint(self.START_YEAR_MIN, self.START_YEAR_MAX)
+            else self._sample_start_year()
         )
         if not self.START_YEAR_MIN <= resolved_year <= self.START_YEAR_MAX:
             raise ValueError(
                 "start_year must be between "
                 f"{self.START_YEAR_MIN} and {self.START_YEAR_MAX}, got {resolved_year}"
             )
-        self.start_date = date(resolved_year, self.START_MONTH, self.START_DAY)
+        # ELI5: callers can force month for deterministic tests; otherwise
+        # we choose from April/May to match historical departure timing.
+        resolved_month = (
+            start_month
+            if start_month is not None
+            else random.choice(self.START_MONTH_OPTIONS)
+        )
+        if resolved_month not in self.START_MONTH_OPTIONS:
+            raise ValueError(
+                "start_month must be one of "
+                f"{self.START_MONTH_OPTIONS}, got {resolved_month}"
+            )
+
+        self.start_date = date(resolved_year, resolved_month, self.START_DAY)
         # Day 0 is a setup state before play starts; Day 1 should render as
-        # March 1st, so we derive current_date from day count in advance_day().
+        # departure date, so we derive current_date from day count in advance_day().
         self.current_date = self.start_date
+        # Route choice at Soda Springs is undecided at simulation start.
+        self.trail_choice_made: bool = False
+        self.active_route: str = "oregon"
+        self.active_stops: List[dict[str, object]] = TRAIL_STOPS
+        self.active_stop_by_name: Dict[str, dict[str, object]] = STOP_BY_NAME
+
+    def _sample_start_year(self) -> int:
+        """Sample a weighted start year grounded in migration waves."""
+        years = list(range(self.START_YEAR_MIN, self.START_YEAR_MAX + 1))
+        weights = [self.START_YEAR_WEIGHTS.get(year, 1) for year in years]
+        return random.choices(years, weights=weights, k=1)[0]
+
+    @property
+    def infrastructure_safety_factor(self) -> float:
+        """Return era-based crossing safety improvement factor.
+
+        ELI5:
+        - Earlier years had rougher crossings.
+        - Later years had more ferries/bridges and guide knowledge.
+        - Lower factor means less crossing danger when multiplied into risk.
+        """
+        year = self.start_date.year
+        if year >= 1854:
+            return 0.75
+        if year >= 1850:
+            return 0.85
+        if year >= 1846:
+            return 0.92
+        return 1.0
+
+    @property
+    def needs_trail_choice(self) -> bool:
+        """Return True once Soda Springs is reached and route is still undecided."""
+        return (not self.trail_choice_made) and self.miles_traveled >= 1180.0
+
+    def apply_trail_choice(self, route: str) -> None:
+        """Apply the post-Soda route choice and switch map context."""
+        normalized = route.lower()
+        if normalized == "california":
+            self.active_route = "california"
+            self.active_stops = CALIFORNIA_TRAIL_STOPS
+            self.active_stop_by_name = CALIFORNIA_STOP_BY_NAME
+            self.GOAL_MILES = int(CALIFORNIA_TRAIL_STOPS[-1]["distance"])
+        else:
+            self.active_route = "oregon"
+            self.active_stops = TRAIL_STOPS
+            self.active_stop_by_name = STOP_BY_NAME
+            self.GOAL_MILES = int(TRAIL_STOPS[-1]["distance"])
+        self.trail_choice_made = True
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -349,11 +465,11 @@ class WagonTrain:
         - Find the first one that is still ahead of us.
         - If we are already at/after the end, keep returning destination.
         """
-        for stop in TRAIL_STOPS:
+        for stop in self.active_stops:
             stop_distance = int(stop["distance"])
             if self.miles_traveled < stop_distance:
                 return str(stop["name"])
-        return TRAIL_DESTINATION
+        return str(self.active_stops[-1]["name"])
 
     @property
     def distance_to_next_landmark(self) -> float:
@@ -365,7 +481,7 @@ class WagonTrain:
         - If we are already at the finish, we return 0 (not negative).
         """
         next_stop_name = self.next_landmark
-        next_stop = STOP_BY_NAME.get(next_stop_name)
+        next_stop = self.active_stop_by_name.get(next_stop_name)
         if next_stop is None:
             return 0.0
 
@@ -382,7 +498,7 @@ class WagonTrain:
         - This lets game systems ask, "Where are we right now-ish?"
         """
         current_name = TRAIL_START
-        for stop in TRAIL_STOPS:
+        for stop in self.active_stops:
             stop_name = str(stop["name"])
             stop_distance = int(stop["distance"])
             if self.miles_traveled >= stop_distance:
@@ -396,7 +512,7 @@ class WagonTrain:
 
         ELI5: tags are tiny labels like "fort" or "river" attached to stops.
         """
-        stop = STOP_BY_NAME.get(stop_name)
+        stop = self.active_stop_by_name.get(stop_name)
         if stop is None:
             return False
         return bool(stop.get(tag, False))
@@ -444,6 +560,12 @@ class WagonTrain:
         # River management
         self._days_until_river -= 1
         self.river_ahead = self._days_until_river <= 0
+
+        # Countdown temporary trail-intel/safety effects.
+        if self.disease_warning_days > 0:
+            self.disease_warning_days -= 1
+        if self.crossing_safety_days > 0:
+            self.crossing_safety_days -= 1
 
         # Natural food spoilage each day.
         # We softened this range so the party is still under pressure,

@@ -146,6 +146,51 @@ class DecisionEngine:
         winning_action = max(tally, key=lambda a: tally[a])
         return winning_action, tally
 
+
+    def collect_trail_votes(
+        self, agents: List["Agent"], world: "WagonTrain"
+    ) -> Dict[str, float]:
+        """Collect weighted votes for Oregon, California, or split plans."""
+        living = [a for a in agents if a.alive]
+        tally: Dict[str, float] = Counter()
+        for agent in living:
+            plan = agent.propose_trail_plan(world)
+            modifier = agent.get_relationship_modifier(living)
+            tally[plan] += agent.effective_influence * modifier
+            tally[plan] += agent.effective_influence_for_world(world)
+        return dict(tally)
+
+    def resolve_trail_choice(
+        self, agents: List["Agent"], world: "WagonTrain"
+    ) -> Tuple[str, Dict[str, float], str]:
+        """Resolve the Soda Springs route vote with split-party handling."""
+        tally = self.collect_trail_votes(agents, world)
+        if not tally:
+            return "oregon", tally, "No votes were cast; the party stays on the Oregon Trail."
+
+        winning_plan = max(tally, key=lambda k: tally[k])
+        if winning_plan != "split":
+            route = winning_plan if winning_plan in ("oregon", "california") else "oregon"
+            msg = f"Soda Springs vote selects the {route.title()} Trail."
+            return route, tally, msg
+
+        # ELI5: if "split" wins, we follow whichever resulting party has more
+        # influence, as requested by the product rule.
+        living = [a for a in agents if a.alive]
+        route_influence = {"oregon": 0.0, "california": 0.0}
+        for agent in living:
+            preference = agent.preferred_trail(world)
+            modifier = agent.get_relationship_modifier(living)
+            route_influence[preference] += agent.effective_influence * modifier
+
+        chosen_route = max(route_influence, key=lambda route: route_influence[route])
+        msg = (
+            "Soda Springs vote favored a split party; "
+            f"the caravan follows the {chosen_route.title()} group "
+            "because it has greater influence."
+        )
+        return chosen_route, tally, msg
+
     # ------------------------------------------------------------------
     # Apply action to world state
     # ------------------------------------------------------------------
@@ -471,6 +516,18 @@ class DecisionEngine:
             FORD_RISK_FLOOR,
             FORD_RISK_BASE - len(scouts) * FORD_RISK_PER_SCOUT_REDUCTION,
         )
+
+        # ELI5: later trail years had better crossing infrastructure and shared
+        # route knowledge, so we scale risk down a bit by era.
+        risk *= world.infrastructure_safety_factor
+        if world.crossing_safety_days > 0:
+            # ELI5: temporary bonus from finding safer crossing info or local
+            # ferry/bridge tips in recent events.
+            risk *= 0.8
+            msgs.append(
+                "Recent crossing advice and safer approaches reduce river danger today."
+            )
+        risk = max(FORD_RISK_FLOOR, risk)
 
         if random.random() < risk:
             # Bad crossing

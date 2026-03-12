@@ -89,6 +89,9 @@ class Agent:
         self.alive: bool = True
         # Trust scores toward other agents by name: 0.0 = distrust, 0.5 = neutral, 1.0 = full trust
         self.relationships: Dict[str, float] = {}
+        # ELI5: every traveler starts the trip with a route destination in mind.
+        # This preference is a starting anchor, not a permanent lock.
+        self.intended_route: str = self._initial_trail_intent()
 
     # ------------------------------------------------------------------
     # Properties with clamping
@@ -183,6 +186,26 @@ class Agent:
 
         return base * boost_multiplier
 
+    def _initial_trail_intent(self) -> str:
+        """Set this traveler's starting route intent at journey start.
+
+        ELI5:
+        - Adventure-heavy roles lean California.
+        - Care and stability roles lean Oregon.
+        - Personal risk tolerance nudges either way.
+        """
+        intent_score = 0.0
+
+        if self.role in (Role.HUNTER, Role.SCOUT, Role.GUARD):
+            intent_score += 0.35
+        if self.role in (Role.MEDIC, Role.COOK, Role.HOSTLER):
+            intent_score -= 0.35
+
+        intent_score += (self.traits.risk_tolerance - 0.5) * 0.8
+        intent_score -= (self.traits.cooperation - 0.5) * 0.2
+
+        return "california" if intent_score >= 0.0 else "oregon"
+
     # ------------------------------------------------------------------
     # Relationship system
     # ------------------------------------------------------------------
@@ -205,6 +228,82 @@ class Agent:
         """Adjust trust toward another agent by *delta*, clamped to [0.0, 1.0]."""
         current = self.relationships.get(other_name, 0.5)
         self.relationships[other_name] = max(0.0, min(1.0, current + delta))
+
+
+    def preferred_trail(self, world: "WagonTrain") -> str:  # noqa: F821
+        """Return preferred route, allowing hardship-driven mind changes.
+
+        ELI5:
+        - Travelers begin with `intended_route`.
+        - If conditions become exceptionally bad, they may switch priorities.
+        - Hunger pushes toward the shorter route (California in this model).
+        - Sickness/exhaustion pushes toward the easier route (Oregon in this model).
+        """
+        preferred = self.intended_route
+
+        # Build route scores from the traveler's starting intent.
+        route_scores = {
+            "oregon": 0.0,
+            "california": 0.0,
+        }
+        route_scores[preferred] += 1.0
+
+        # Role biases are a soft nudge, not a hard lock.
+        if self.role in (Role.HUNTER, Role.SCOUT, Role.GUARD):
+            route_scores["california"] += 0.25
+        if self.role in (Role.MEDIC, Role.COOK, Role.HOSTLER):
+            route_scores["oregon"] += 0.25
+
+        # Distress signals that can override starting intent.
+        exceptionally_hungry = self.hunger >= 75.0 or world.food_days_remaining <= 2.5
+        exceptionally_sick = self.health <= 35.0 or world.sickness_count >= 2
+        exceptionally_tired = self.morale <= 30.0 or world.morale <= 40.0
+
+        # ELI5: after the 1849 Gold Rush, California became more attractive,
+        # so we add a gentle historical nudge in those years.
+        if world.start_date.year >= 1849:
+            route_scores["california"] += 0.3
+
+        # Hungry travelers are willing to gamble for what they perceive as shorter.
+        if exceptionally_hungry:
+            route_scores["california"] += 2.0
+            # ELI5: truly low food-days creates panic for perceived short-path gains.
+            if world.food_days_remaining <= 1.5:
+                route_scores["california"] += 0.5
+
+        # Sick/tired travelers prefer easier and more conservative routing.
+        if exceptionally_sick:
+            route_scores["oregon"] += 1.0
+        if exceptionally_tired:
+            route_scores["oregon"] += 0.9
+
+        # Stubbornness resists changing from original intent.
+        route_scores[self.intended_route] += self.traits.stubbornness * 0.8
+
+        return max(route_scores, key=lambda route: route_scores[route])
+
+    def propose_trail_plan(self, world: "WagonTrain") -> str:  # noqa: F821
+        """Propose 'oregon', 'california', or 'split' at Soda Springs.
+
+        ELI5:
+        - Most people cast a direct route vote.
+        - Split votes are now rarer and mostly appear when conditions are stable.
+        - Under high distress, people avoid splitting and pick a direct route.
+        """
+        high_distress = (
+            world.food_days_remaining <= 4.0
+            or world.sickness_count >= 1
+            or self.morale <= 45.0
+            or self.health <= 45.0
+        )
+
+        if (
+            not high_distress
+            and self.traits.cooperation >= 0.82
+            and self.traits.stubbornness <= 0.28
+        ):
+            return "split"
+        return self.preferred_trail(world)
 
     # ------------------------------------------------------------------
     # Action proposal
