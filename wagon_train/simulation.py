@@ -26,9 +26,9 @@ def build_default_party() -> List[Agent]:
         Agent("Jesse Fox",     Role.SCOUT,     Traits(0.7, 0.4, 0.3, 0.5)),
         Agent("Mae Cooper",    Role.PASSENGER, Traits(0.4, 0.6, 0.5, 0.7)),
         Agent("Old Pete",      Role.PASSENGER, Traits(0.2, 0.5, 0.8, 0.4)),
+        Agent("Rev. Silas Boone", Role.PREACHER, Traits(0.2, 0.8, 0.7, 0.9)),
         Agent("Ruby Dalton",   Role.PASSENGER, Traits(0.5, 0.7, 0.4, 0.8)),
         Agent("Caleb Stone",   Role.HUNTER,    Traits(0.7, 0.3, 0.6, 0.4)),
-        Agent("Nora Wells",    Role.PASSENGER, Traits(0.4, 0.8, 0.3, 0.9)),
     ]
     return party
 
@@ -80,6 +80,8 @@ class Simulation:
 
             # 1. Advance day (weather, spoilage, wear)
             self.world.advance_day()
+            # Capture where the day starts so we can measure net daily progress.
+            day_start_miles = self.world.miles_traveled
 
             # 2. Log day header
             self.logger.log_day_header(self.world)
@@ -103,7 +105,11 @@ class Simulation:
             outcomes = self.engine.apply_action(winning_action, self.agents, self.world)
             self.logger.log_outcomes(outcomes)
 
-            # 7. Agent status
+            # 8. Record non-negative net progress for the entire day
+            # (events + chosen action combined).
+            self.world.record_daily_progress(self.world.miles_traveled - day_start_miles)
+
+            # 9. Agent status
             self.logger.log_agent_status(self.agents)
 
         # Determine end reason

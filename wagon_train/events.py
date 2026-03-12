@@ -33,6 +33,7 @@ EVENT_CATALOGUE: List[dict] = [
         "health_delta": 0,
         "morale_delta": -5,
         "sickness": False,
+        "wagon_break": True,
     },
     {
         "name": "Dysentery Outbreak",
@@ -152,6 +153,7 @@ EVENT_CATALOGUE: List[dict] = [
         "health_delta": 0,
         "morale_delta": -4,
         "sickness": False,
+        "wagon_break": True,
     },
     {
         "name": "Cholera Scare",
@@ -168,8 +170,63 @@ EVENT_CATALOGUE: List[dict] = [
 class EventSystem:
     """Generates and applies random events each day."""
 
-    # Probability that any event occurs on a given day
-    BASE_EVENT_CHANCE = 0.35
+    # Probability that any event occurs on a given day.
+    # Lower than before to reduce relentless stacking penalties.
+    BASE_EVENT_CHANCE = 0.22
+
+    def __init__(self) -> None:
+        # Keep a tiny bit of memory so event selection can avoid
+        # repetitive severe punishment streaks.
+        self._last_event_severity: str = "neutral"
+
+    def _event_severity(self, event_data: dict) -> str:
+        """Classify an event into a rough severity tier.
+
+        This is intentionally simple and transparent, so balancing is easy.
+        """
+        total_delta = (
+            event_data.get("food_delta", 0)
+            + event_data.get("parts_delta", 0)
+            + event_data.get("health_delta", 0)
+            + event_data.get("morale_delta", 0)
+            + event_data.get("miles_delta", 0)
+        )
+        if total_delta <= -25 or event_data.get("sickness"):
+            return "severe_negative"
+        if total_delta < 0:
+            return "mild_negative"
+        if total_delta > 10:
+            return "positive"
+        return "neutral"
+
+    def _event_weight(self, severity: str) -> float:
+        """Return sampling weight by severity category."""
+        weights = {
+            "neutral": 1.2,
+            "mild_negative": 1.0,
+            "severe_negative": 0.35,
+            "positive": 0.9,
+        }
+        return weights[severity]
+
+    def _choose_event(self) -> dict:
+        """Pick an event using weighted severity and anti-streak logic."""
+        weighted_events = []
+        weighted_values = []
+        for event in EVENT_CATALOGUE:
+            severity = self._event_severity(event)
+            # Anti-streak protection: if yesterday was severe negative,
+            # strongly suppress severe negatives today.
+            anti_streak_factor = 0.2 if (
+                self._last_event_severity == "severe_negative"
+                and severity == "severe_negative"
+            ) else 1.0
+            weighted_events.append(event)
+            weighted_values.append(self._event_weight(severity) * anti_streak_factor)
+
+        chosen = random.choices(weighted_events, weights=weighted_values, k=1)[0]
+        self._last_event_severity = self._event_severity(chosen)
+        return chosen
 
     def roll(self, world: "WagonTrain", agents: List["Agent"]) -> List[str]:
         """Potentially trigger a random event; return list of messages."""
@@ -178,7 +235,7 @@ class EventSystem:
         if random.random() > self.BASE_EVENT_CHANCE:
             return messages  # No event today
 
-        event_data = random.choice(EVENT_CATALOGUE)
+        event_data = self._choose_event()
         messages.append(f"[EVENT] {event_data['name']}: {event_data['description']}")
 
         living = [a for a in agents if a.alive]
@@ -198,7 +255,13 @@ class EventSystem:
             world.morale = max(0.0, min(100.0, world.morale + event_data["morale_delta"]))
 
         if event_data.get("miles_delta", 0):
-            world.miles_traveled = max(0.0, world.miles_traveled + event_data["miles_delta"])
+            miles_delta = event_data["miles_delta"]
+            # We never move backwards on the trail.
+            # Negative "miles" events now mean lost opportunity/time, not literal reverse travel.
+            if miles_delta > 0:
+                world.miles_traveled += miles_delta
+            else:
+                messages.append("  Progress stalls for the day due to the incident.")
 
         # Apply health delta
         health_delta = event_data.get("health_delta", 0)
@@ -221,5 +284,18 @@ class EventSystem:
         # Record sickness
         if event_data.get("sickness"):
             world.sickness_events.append(event_data["name"])
+
+        # Assign urgent wagon-repair responsibility on breakage events.
+        # We prefer mechanics when possible; otherwise pick a random living traveler.
+        if event_data.get("wagon_break") and living:
+            from .agent import Role
+
+            mechanic_candidates = [a for a in living if a.role == Role.MECHANIC]
+            assignee_pool = mechanic_candidates if mechanic_candidates else living
+            assignee = random.choice(assignee_pool)
+            world.urgent_repair_assignee = assignee.name
+            messages.append(
+                f"  Urgent task: {assignee.name} must coordinate immediate wagon repairs."
+            )
 
         return messages

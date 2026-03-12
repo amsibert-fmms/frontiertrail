@@ -3,6 +3,7 @@
 import sys
 import os
 import random
+from datetime import date
 
 import pytest
 
@@ -10,7 +11,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wagon_train.agent import Agent, Role, Traits
-from wagon_train.world import WagonTrain, Weather
+from wagon_train.world import LANDMARKS, TRAIL_DESTINATION, TRAIL_STOPS, WagonTrain, Weather
 from wagon_train.decisions import Action, DecisionEngine
 from wagon_train.events import EventSystem
 from wagon_train.logger import SimulationLogger
@@ -154,6 +155,29 @@ class TestAgent:
         assert a.relationships["Bob"] == 1.0  # clamped at max
         a.update_relationship("Bob", -2.0)
         assert a.relationships["Bob"] == 0.0  # clamped at min
+    def test_progress_bias_prefers_travel_when_behind_schedule(self):
+        # When the group is very behind schedule and not in emergency survival
+        # territory, normal passengers should lean toward progress actions.
+        world = WagonTrain()
+        world.day = 150
+        world.miles_traveled = 500.0
+        a = Agent("Traveler", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5), morale=60.0)
+        action = a.propose_action(world)
+        assert action == Action.TRAVEL
+
+    def test_urgent_repair_assignee_forces_repair_vote(self):
+        world = WagonTrain()
+        a = Agent("Fixer", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
+        world.urgent_repair_assignee = "Fixer"
+        assert a.propose_action(world) == Action.REPAIR_WAGON
+
+    def test_preacher_prefers_rest_on_sunday_when_stable(self):
+        world = WagonTrain(start_year=1843)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+        preacher = Agent("Rev", Role.PREACHER, Traits(0.5, 0.5, 0.5, 0.5), health=95.0, morale=80.0)
+        assert preacher.propose_action(world) == Action.REST
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +198,18 @@ class TestWagonTrain:
         world.advance_day()
         assert world.day == 1
 
+    def test_calendar_starts_mar_1_and_year_is_in_requested_range(self):
+        world = WagonTrain()
+        world.advance_day()
+        assert world.current_date.month == 3
+        assert world.current_date.day == 1
+        assert 1840 <= world.current_date.year <= 1860
+
+    def test_start_year_can_be_forced_for_deterministic_date(self):
+        world = WagonTrain(start_year=1851)
+        world.advance_day()
+        assert world.current_date == date(1851, 3, 1)
+
     def test_advance_day_reduces_food(self):
         world = WagonTrain()
         food_before = world.food_supply
@@ -188,8 +224,79 @@ class TestWagonTrain:
 
     def test_is_finished_on_miles(self):
         world = WagonTrain()
-        world.miles_traveled = 2000.0
+        world.miles_traveled = world.GOAL_MILES
         assert world.is_finished
+
+
+
+    def test_goal_miles_matches_ordered_trail_data(self):
+        world = WagonTrain()
+        # ELI5: finish line should exactly match the final cumulative-mile stop.
+        assert world.GOAL_MILES == 2040
+        assert world.GOAL_MILES == TRAIL_STOPS[-1]["distance"]
+
+    def test_next_landmark_tracks_progress(self):
+        world = WagonTrain()
+        # At the very start, the first stop ahead should be Kansas River Crossing.
+        assert world.next_landmark == "Kansas River Crossing"
+
+        # At exactly 102 miles, we should now be aiming for Big Blue River Crossing.
+        world.miles_traveled = 102.0
+        assert world.next_landmark == "Big Blue River Crossing"
+
+        # Near the end of the route, the next stop should be Barlow Road.
+        world.miles_traveled = 1901.0
+        assert world.next_landmark == "Barlow Road"
+
+        # Once at/after destination, keep returning destination node.
+        world.miles_traveled = world.GOAL_MILES
+        assert world.next_landmark == TRAIL_DESTINATION
+
+    def test_landmarks_contains_linear_hops_with_segment_miles(self):
+        # ELI5: each hop should match the cumulative distance differences.
+        assert ("Kansas River Crossing", 102) in LANDMARKS["Independence, Missouri"]["next"]
+        assert ("Fort Kearny", 135) in LANDMARKS["Big Blue River Crossing"]["next"]
+        assert ("The Dalles", 50) in LANDMARKS["Columbia River"]["next"]
+        assert ("Oregon City / Willamette Valley", 60) in LANDMARKS["Barlow Road"]["next"]
+
+    def test_stop_type_helpers_by_name(self):
+        world = WagonTrain()
+        # ELI5: these checks prove the stop labels were wired correctly.
+        assert world.is_fort_stop("Fort Kearny")
+        assert not world.is_fort_stop("Chimney Rock")
+
+        assert world.is_river_crossing_stop("Green River Crossing")
+        assert not world.is_river_crossing_stop("Fort Hall")
+
+        assert world.is_landmark_stop("Blue Mountains")
+        assert not world.is_landmark_stop("Soda Springs")
+
+        # Unknown names should fail safely (False, not crash).
+        assert not world.is_fort_stop("Not A Real Stop")
+
+    def test_current_location_type_helpers(self):
+        world = WagonTrain()
+
+        # Start of trail is Independence, not tagged fort/river/landmark.
+        assert world.current_or_last_stop == "Independence, Missouri"
+        assert not world.at_fort_stop
+        assert not world.at_river_crossing_stop
+        assert not world.at_landmark_stop
+
+        # At Fort Kearny miles, we should report fort context.
+        world.miles_traveled = 320
+        assert world.current_or_last_stop == "Fort Kearny"
+        assert world.at_fort_stop
+
+        # At Green River miles, we should report river crossing context.
+        world.miles_traveled = 989
+        assert world.current_or_last_stop == "Green River Crossing"
+        assert world.at_river_crossing_stop
+
+        # At Blue Mountains miles, we should report landmark context.
+        world.miles_traveled = 1700
+        assert world.current_or_last_stop == "Blue Mountains"
+        assert world.at_landmark_stop
 
     def test_is_finished_on_days(self):
         world = WagonTrain()
@@ -238,6 +345,19 @@ class TestWagonTrain:
     def test_recent_travel_speed_empty(self):
         world = WagonTrain()
         assert world.recent_travel_speed == 0.0
+    def test_miles_needed_per_remaining_day_is_positive(self):
+        world = WagonTrain()
+        world.day = 100
+        world.miles_traveled = 900
+        assert world.miles_needed_per_remaining_day > 0
+
+    def test_record_daily_progress_clamps_negative_and_tracks_streak(self):
+        world = WagonTrain()
+        world.record_daily_progress(-10.0)
+        assert world.last_daily_progress == 0.0
+        assert world.low_progress_streak == 1
+        world.record_daily_progress(12.0)
+        assert world.low_progress_streak == 0
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +413,26 @@ class TestDecisionEngine:
         avg_health = sum(a.health for a in party) / len(party)
         assert avg_health > 50.0
 
+    def test_work_on_sunday_applies_half_rest_penalty(self, monkeypatch):
+        engine = DecisionEngine()
+        world = WagonTrain(start_year=1848)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+
+        party = self._make_party()
+        for a in party:
+            a.health = 90.0
+            a.morale = 80.0
+
+        # Keep numbers deterministic for stable assertions.
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.TRAVEL, party, world)
+
+        assert any("half rest" in msg for msg in outcomes)
+        assert sum(a.health for a in party) / len(party) < 90.0
+        assert sum(a.morale for a in party) / len(party) < 80.0
+
     def test_hunt_may_add_food(self):
         random.seed(42)
         engine = DecisionEngine()
@@ -302,6 +442,22 @@ class TestDecisionEngine:
         engine.apply_action(Action.HUNT, party, world)
         # Food may increase or not — just ensure it doesn't go negative
         assert world.food_supply >= 0.0
+
+    def test_hunt_failure_still_adds_small_food(self, monkeypatch):
+        # Force hunt failure and verify consolation foraging food is added.
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.weather = Weather.SUNNY
+        party = [Agent("Hunter", Role.HUNTER, Traits())]
+        before_food = world.food_supply
+
+        # First random.random call in _do_hunt decides success/failure.
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        engine.apply_action(Action.HUNT, party, world)
+
+        # Even after daily food consumption, failed hunts should not produce
+        # a net catastrophic food drop from zero gain; foraging adds some food.
+        assert world.food_supply > before_food - 2.0
 
     def test_repair_increases_parts(self):
         engine = DecisionEngine()
@@ -324,6 +480,14 @@ class TestDecisionEngine:
 
         # After ration, food supply should be higher (less consumed)
         assert world1.food_supply >= world2.food_supply
+
+    def test_repair_clears_urgent_repair_assignment(self):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.urgent_repair_assignee = "Mech"
+        party = [Agent("Mech", Role.MECHANIC, Traits())]
+        engine.apply_action(Action.REPAIR_WAGON, party, world)
+        assert world.urgent_repair_assignee is None
 
     def test_ford_river_crosses_when_river_present(self):
         engine = DecisionEngine()
@@ -424,6 +588,49 @@ class TestEventSystem:
             # Just verify no crashes and values stay non-negative
             assert world.food_supply >= 0.0
 
+    def test_negative_miles_event_never_moves_backwards(self):
+        es = EventSystem()
+        world = WagonTrain()
+        world.miles_traveled = 100.0
+        party = [Agent("A", Role.MECHANIC, Traits())]
+
+        synthetic = {
+            "name": "Synthetic Stall",
+            "description": "Testing no-backwards-travel rule.",
+            "food_delta": 0,
+            "parts_delta": 0,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "miles_delta": -25,
+            "sickness": False,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+        es.roll(world, party)
+        assert world.miles_traveled == 100.0
+
+    def test_wagon_break_event_assigns_urgent_repair_owner(self):
+        es = EventSystem()
+        world = WagonTrain()
+        party = [
+            Agent("Mechanic", Role.MECHANIC, Traits()),
+            Agent("Passenger", Role.PASSENGER, Traits()),
+        ]
+        synthetic = {
+            "name": "Synthetic Wagon Break",
+            "description": "Testing urgent repair assignment.",
+            "food_delta": 0,
+            "parts_delta": -10,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "sickness": False,
+            "wagon_break": True,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+        es.roll(world, party)
+        assert world.urgent_repair_assignee == "Mechanic"
+
 
 # ---------------------------------------------------------------------------
 # Logger tests
@@ -458,6 +665,7 @@ class TestSimulation:
         assert Role.MECHANIC in roles
         assert Role.SCOUT in roles
         assert Role.PASSENGER in roles
+        assert Role.PREACHER in roles
 
     def test_simulation_initializes_relationships(self):
         sim = Simulation(seed=1, log_to_stdout=False)

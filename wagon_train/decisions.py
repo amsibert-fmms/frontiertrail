@@ -37,11 +37,41 @@ class Action(str, Enum):
 # ------------------------------------------------------------------
 
 # Miles gained per travel day (base)
-TRAVEL_BASE_MILES = 20.0
+# We intentionally increased this baseline so that, after accounting for
+# non-travel days, weather, and setbacks, successful runs are actually feasible.
+TRAVEL_BASE_MILES = 32.0
 
 # Food gained from a successful hunt (base range)
 HUNT_FOOD_MIN = 30.0
 HUNT_FOOD_MAX = 70.0
+# If hunting fails, the party can still forage a small amount.
+HUNT_FOOD_FAIL_MIN = 4.0
+HUNT_FOOD_FAIL_MAX = 10.0
+
+# Hunt success tuning (Pass 3A):
+# We keep these as named constants so balancing can iterate safely without
+# rewriting core hunt logic each pass.
+#
+# ELI5:
+# - BASE = how likely any party is to find food at all.
+# - PER_HUNTER = how much each hunter helps at first.
+# - EXTRA_HUNTER = how much hunters beyond the first two still help,
+#   but at a smaller "diminishing returns" amount.
+# - CAP = never let hunt become near-guaranteed.
+HUNT_SUCCESS_BASE = 0.30
+HUNT_SUCCESS_PER_HUNTER = 0.18
+HUNT_SUCCESS_EXTRA_HUNTER = 0.10
+HUNT_SUCCESS_DIMINISH_AFTER = 2
+HUNT_SUCCESS_CAP = 0.86
+
+# Sunday work penalty model.
+# ELI5: if the group chooses to work on Sunday, they miss a chunk of weekly
+# recovery. We model that as a small health/morale hit equivalent to giving up
+# about half a rest day.
+SUNDAY_WORK_HEALTH_LOSS_MIN = 1.5
+SUNDAY_WORK_HEALTH_LOSS_MAX = 4.0
+SUNDAY_WORK_MORALE_LOSS_MIN = 1.0
+SUNDAY_WORK_MORALE_LOSS_MAX = 3.0
 
 # Parts restored by a repair action
 REPAIR_PARTS_RESTORE = 20.0
@@ -49,12 +79,22 @@ REPAIR_PARTS_RESTORE = 20.0
 # Ration food reduces consumption but costs morale
 RATION_CONSUMPTION_FACTOR = 0.4   # 40 % of normal consumption
 
-# Health cost of fording a river (base range per person)
-FORD_HEALTH_COST_MIN = 5.0
-FORD_HEALTH_COST_MAX = 25.0
+# Health cost of fording a river (base range per person).
+# Tuning pass #1 narrows this band so a failed crossing is still scary
+# but less likely to cause an unrecoverable full-party spiral.
+FORD_HEALTH_COST_MIN = 3.0
+FORD_HEALTH_COST_MAX = 10.0
+
+# River risk model constants.
+# ELI5: crossing always has danger, but scouts should noticeably lower that danger.
+FORD_RISK_BASE = 0.5
+FORD_RISK_PER_SCOUT_REDUCTION = 0.1
+FORD_RISK_FLOOR = 0.08
 
 # Miles gained when fording / crossing a river
 FORD_MILES = 5.0
+# Miles gained when fording
+FORD_MILES = 12.0
 
 # Food cost of taking a ferry (simulates trading supplies)
 FERRY_COST_MIN = 10.0
@@ -133,6 +173,11 @@ class DecisionEngine:
 
         elif action == Action.FERRY_ACROSS:
             outcomes.extend(self._do_ferry(living, world, n))
+        # Sunday-rest rule:
+        # If the party works on Sunday, we allow it (no hard lock-out), but we
+        # apply a half-rest penalty to represent missed recovery time.
+        if world.is_sunday and action != Action.REST:
+            outcomes.extend(self._apply_sunday_work_penalty(living))
 
         # Always consume some food (modified by action)
         outcomes.extend(self._consume_food(living, world, action))
@@ -158,8 +203,11 @@ class DecisionEngine:
             return msgs
 
         modifier = world.travel_modifier
-        # Wagon-parts penalty
-        parts_factor = min(1.0, world.wagon_parts / 50.0)
+        # Wagon-parts factor:
+        # - Old model punished low parts very harshly.
+        # - New model keeps a floor so the party is slowed, not frozen.
+        # - We also cap top-end bonus to keep things predictable.
+        parts_factor = min(1.2, 0.5 + world.wagon_parts / 100.0)
         miles = TRAVEL_BASE_MILES * modifier * parts_factor
         miles *= random.uniform(0.8, 1.2)  # ±20% random variation
         world.miles_traveled += miles
@@ -193,11 +241,40 @@ class DecisionEngine:
         # Find the best hunter(s)
         from .agent import Role
         hunters = [a for a in living if a.role == Role.HUNTER]
-        skill = len(hunters) * 0.3 + 0.4  # baseline success chance
-        success_chance = min(0.95, skill)
+
+        # Hunting success model (Pass 3A):
+        # We intentionally rebalance hunt to avoid very high reliability that can
+        # dominate decision-making and trap the party in hunt-heavy loops.
+        #
+        # ELI5 of the formula:
+        # 1) Everybody gets a small base chance.
+        # 2) First two hunters add stronger value.
+        # 3) Hunters after the second still help, but less (diminishing returns).
+        # 4) A hard cap prevents near-guaranteed hunts.
+        hunter_count = len(hunters)
+        primary_hunters = min(hunter_count, HUNT_SUCCESS_DIMINISH_AFTER)
+        extra_hunters = max(0, hunter_count - HUNT_SUCCESS_DIMINISH_AFTER)
+        skill = (
+            HUNT_SUCCESS_BASE
+            + primary_hunters * HUNT_SUCCESS_PER_HUNTER
+            + extra_hunters * HUNT_SUCCESS_EXTRA_HUNTER
+        )
+        success_chance = min(HUNT_SUCCESS_CAP, skill)
+
+        # Weather affects hunt reliability and yields.
+        # Bad weather means less activity/visibility and harder tracking.
+        weather_hunt_factor = {
+            "sunny": 1.0,
+            "cloudy": 0.95,
+            "hot": 0.9,
+            "rainy": 0.8,
+            "snowy": 0.75,
+            "stormy": 0.6,
+        }[world.weather.value]
+        success_chance *= weather_hunt_factor
 
         if random.random() < success_chance:
-            food_gained = random.uniform(HUNT_FOOD_MIN, HUNT_FOOD_MAX)
+            food_gained = random.uniform(HUNT_FOOD_MIN, HUNT_FOOD_MAX) * weather_hunt_factor
             world.food_supply += food_gained
             msgs.append(f"The hunt is successful! +{food_gained:.1f} lbs of food.")
             for agent in living:
@@ -208,7 +285,13 @@ class DecisionEngine:
                     if agent is not hunter:
                         _adjust_relationship(agent, hunter.name, +0.05)
         else:
-            msgs.append("The hunting party returns empty-handed.")
+            # Even on a "failed" hunt, basic foraging usually finds something.
+            consolation_food = random.uniform(HUNT_FOOD_FAIL_MIN, HUNT_FOOD_FAIL_MAX)
+            world.food_supply += consolation_food
+            msgs.append(
+                "The hunting party has little luck, "
+                f"but foraging adds +{consolation_food:.1f} lbs of food."
+            )
             for agent in living:
                 agent.morale = max(0.0, agent.morale - 2.0)
             # Slight loss of trust in hunters
@@ -227,6 +310,8 @@ class DecisionEngine:
         bonus = len(mechanics) * 5.0
         restored = REPAIR_PARTS_RESTORE + bonus
         world.wagon_parts = min(100.0, world.wagon_parts + restored)
+        # Once repair action is completed, clear any urgent person-specific repair duty.
+        world.urgent_repair_assignee = None
         msgs.append(
             f"The wagon is repaired. Parts supply restored by {restored:.0f} points "
             f"(now {world.wagon_parts:.0f})."
@@ -256,10 +341,18 @@ class DecisionEngine:
             return msgs
 
         msgs.append("The party attempts to ford the river!")
-        # Risk varies; scouts reduce danger
+        # Risk varies; scouts reduce danger.
+        #
+        # ELI5:
+        # - Start with a baseline crossing danger (FORD_RISK_BASE).
+        # - Each scout trims that danger a little bit.
+        # - Keep a floor so crossings are never perfectly safe.
         from .agent import Role
         scouts = [a for a in living if a.role == Role.SCOUT]
-        risk = max(0.1, 0.6 - len(scouts) * 0.1)
+        risk = max(
+            FORD_RISK_FLOOR,
+            FORD_RISK_BASE - len(scouts) * FORD_RISK_PER_SCOUT_REDUCTION,
+        )
 
         if random.random() < risk:
             # Bad crossing
@@ -378,6 +471,9 @@ class DecisionEngine:
         msgs.append("The ferry carries everyone safely across the river.")
         for agent in living:
             agent.morale = min(100.0, agent.morale + 5.0)
+            # Safe crossing can also improve confidence and preserve equipment.
+            world.morale = min(100.0, world.morale + 3.0)
+            world.wagon_parts = min(100.0, world.wagon_parts + 2.0)
 
         world.miles_traveled += FORD_MILES
         world.river_crossed()
@@ -408,6 +504,28 @@ class DecisionEngine:
                 agent.hunger = max(0.0, agent.hunger - FOOD_PER_PERSON_PER_DAY * factor * 5)
         return msgs
 
+    def _apply_sunday_work_penalty(self, living: List["Agent"]) -> List[str]:
+        """Apply reduced-rest costs when the group works on Sunday.
+
+        ELI5:
+        - Working on Sunday is allowed.
+        - But workers lose the equivalent of about half a rest day.
+        - That means a small immediate health/morale decline.
+        """
+        msgs = [
+            "Sunday work continues, but everyone only gets half rest and feels more worn down.",
+        ]
+        for agent in living:
+            agent.health -= random.uniform(
+                SUNDAY_WORK_HEALTH_LOSS_MIN,
+                SUNDAY_WORK_HEALTH_LOSS_MAX,
+            )
+            agent.morale -= random.uniform(
+                SUNDAY_WORK_MORALE_LOSS_MIN,
+                SUNDAY_WORK_MORALE_LOSS_MAX,
+            )
+        return msgs
+
     # ------------------------------------------------------------------
     # Morale update
     # ------------------------------------------------------------------
@@ -426,6 +544,33 @@ class DecisionEngine:
 
         # Drift group morale toward average individual morale
         world.morale += (avg_morale - world.morale) * 0.1
+
+        # Additional world-pressure penalties (stronger than before):
+        # - repeated low/no progress hurts confidence,
+        # - hunger and low health increase hopelessness,
+        # - broken equipment + bad weather reduce spirit.
+        weather_penalty_map = {
+            "sunny": 0.0,
+            "cloudy": 0.4,
+            "hot": 0.8,
+            "rainy": 1.6,
+            "snowy": 2.2,
+            "stormy": 3.0,
+        }
+        avg_hunger = sum(a.hunger for a in living) / len(living) if living else 0.0
+        progress_penalty = min(6.0, world.low_progress_streak * 0.8)
+        hunger_penalty = max(0.0, (avg_hunger - 40.0) * 0.05)
+        health_penalty = max(0.0, (55.0 - avg_health) * 0.07)
+        mechanical_penalty = max(0.0, (45.0 - world.wagon_parts) * 0.05)
+        weather_penalty = weather_penalty_map[world.weather.value]
+
+        world.morale -= (
+            progress_penalty
+            + hunger_penalty
+            + health_penalty
+            + mechanical_penalty
+            + weather_penalty
+        )
         world.morale = max(0.0, min(100.0, world.morale))
 
         # Sync individual morale toward group morale slightly
