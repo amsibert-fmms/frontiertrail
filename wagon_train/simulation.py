@@ -17,7 +17,12 @@ from .world import WagonTrain, Weather
 # ---------------------------------------------------------------------------
 
 def build_default_party() -> List[Agent]:
-    """Create the 10-agent default wagon party."""
+    """Create the 20-agent default wagon roster.
+
+    ELI5:
+    - We keep a fixed ordered list so "first N" selection remains deterministic.
+    - Main entrypoint now allows selecting 10-20 travelers from this roster.
+    """
     party = [
         Agent("Eliza Hart",    Role.LEADER,    Traits(0.5, 0.7, 0.6, 0.8)),
         Agent("Tom Buckley",   Role.HUNTER,    Traits(0.8, 0.4, 0.5, 0.5)),
@@ -29,6 +34,16 @@ def build_default_party() -> List[Agent]:
         Agent("Rev. Silas Boone", Role.PREACHER, Traits(0.2, 0.8, 0.7, 0.9)),
         Agent("Ruby Dalton",   Role.PASSENGER, Traits(0.5, 0.7, 0.4, 0.8)),
         Agent("Caleb Stone",   Role.HUNTER,    Traits(0.7, 0.3, 0.6, 0.4)),
+        Agent("Nora Pike",     Role.PASSENGER, Traits(0.4, 0.6, 0.5, 0.6)),
+        Agent("Elias Ward",    Role.MECHANIC,  Traits(0.4, 0.5, 0.6, 0.5)),
+        Agent("Hattie Sloan",  Role.MEDIC,     Traits(0.3, 0.9, 0.4, 0.8)),
+        Agent("Micah Graves",  Role.SCOUT,     Traits(0.7, 0.4, 0.3, 0.5)),
+        Agent("June Holloway", Role.PASSENGER, Traits(0.5, 0.7, 0.5, 0.7)),
+        Agent("Wyatt Dunn",    Role.HUNTER,    Traits(0.8, 0.3, 0.5, 0.4)),
+        Agent("Abigail Frost", Role.PASSENGER, Traits(0.4, 0.7, 0.5, 0.7)),
+        Agent("Jonah Webb",    Role.PASSENGER, Traits(0.4, 0.6, 0.6, 0.6)),
+        Agent("Martha Bell",   Role.PREACHER,  Traits(0.2, 0.8, 0.7, 0.9)),
+        Agent("Gideon Marsh",  Role.PASSENGER, Traits(0.4, 0.5, 0.6, 0.6)),
     ]
     return party
 

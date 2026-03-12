@@ -120,6 +120,12 @@ class DecisionEngine:
             proposed = agent.propose_action(world)
             modifier = agent.get_relationship_modifier(living)
             tally[proposed] += agent.effective_influence * modifier
+
+            # Use context-aware influence so role specialists get a moderate
+            # voting bump when their service is urgently needed.
+            # ELI5: if the wagon is breaking, mechanics should be listened to a
+            # bit more; if people are sick, medics should matter more, etc.
+            tally[proposed] += agent.effective_influence_for_world(world)
         return dict(tally)
 
     def resolve(
@@ -221,6 +227,33 @@ class DecisionEngine:
         for agent in living:
             agent.health -= random.uniform(0.5, 2.0)
             agent.hunger += random.uniform(1.0, 3.0)
+
+        # Passive role contributions during travel day:
+        # - Hunters gather small trail food while moving.
+        # - Mechanics perform rolling maintenance while moving.
+        # These are intentionally modest so travel remains meaningful without
+        # replacing dedicated hunt/repair actions.
+        from .agent import Role
+        hunters = [a for a in living if a.role == Role.HUNTER]
+        mechanics = [a for a in living if a.role == Role.MECHANIC]
+
+        # Each hunter contributes about one person's daily food need.
+        # FOOD_PER_PERSON_PER_DAY is already the simulation's daily baseline.
+        trail_food = len(hunters) * FOOD_PER_PERSON_PER_DAY
+        if trail_food > 0.0:
+            world.food_supply += trail_food
+            msgs.append(
+                f"Hunters gather trail food while moving: +{trail_food:.1f} lbs."
+            )
+
+        # Each mechanic recovers 2 wagon-parts points while moving.
+        travel_repairs = len(mechanics) * 2.0
+        if travel_repairs > 0.0:
+            world.wagon_parts = min(100.0, world.wagon_parts + travel_repairs)
+            msgs.append(
+                "Mechanics handle rolling maintenance during travel: "
+                f"+{travel_repairs:.0f} parts."
+            )
         return msgs
 
     def _do_rest(
@@ -228,10 +261,40 @@ class DecisionEngine:
     ) -> List[str]:
         msgs: List[str] = []
         msgs.append("The party rests for the day, recovering strength.")
+
+        # Medic-assisted healing bonus:
+        # ELI5: medics make every rest day a little more effective at recovery.
+        from .agent import Role
+        medics = [a for a in living if a.role == Role.MEDIC]
+        medic_heal_bonus = min(4.0, len(medics) * 1.0)
+
         for agent in living:
-            agent.health = min(100.0, agent.health + random.uniform(3.0, 8.0))
+            agent.health = min(
+                100.0,
+                agent.health + random.uniform(3.0, 8.0) + medic_heal_bonus,
+            )
             agent.morale = min(100.0, agent.morale + random.uniform(2.0, 5.0))
         world.morale = min(100.0, world.morale + 3.0)
+
+        if medic_heal_bonus > 0.0:
+            msgs.append(
+                "Medic care improves rest recovery: "
+                f"+{medic_heal_bonus:.1f} bonus healing per traveler."
+            )
+
+        # Preacher Sunday-rest morale boost:
+        # ELI5: when a preacher is present and the group truly rests on Sunday,
+        # morale gets an extra lift from shared ritual/community support.
+        preachers = [a for a in living if a.role == Role.PREACHER]
+        if world.is_sunday and preachers:
+            sunday_morale_bonus = min(6.0, 2.0 + len(preachers) * 1.0)
+            world.morale = min(100.0, world.morale + sunday_morale_bonus)
+            for agent in living:
+                agent.morale = min(100.0, agent.morale + 2.0)
+            msgs.append(
+                "Sunday rest with preacher support lifts spirits: "
+                f"+{sunday_morale_bonus:.1f} group morale."
+            )
         return msgs
 
     def _do_hunt(
@@ -284,6 +347,18 @@ class DecisionEngine:
                 for hunter in hunters:
                     if agent is not hunter:
                         _adjust_relationship(agent, hunter.name, +0.05)
+
+            # Starvation-behavior feedback:
+            # ELI5: if the group spends a whole day hunting but brings back less
+            # food (lbs) than there are people alive, it feels like a poor trade.
+            # We apply a small morale penalty so agents are less likely to get
+            # trapped repeating low-yield hunts forever.
+            if food_gained < float(n):
+                msgs.append(
+                    "The catch is too small for the whole party; spirits dip slightly."
+                )
+                for agent in living:
+                    agent.morale = max(0.0, agent.morale - 1.0)
         else:
             # Even on a "failed" hunt, basic foraging usually finds something.
             consolation_food = random.uniform(HUNT_FOOD_FAIL_MIN, HUNT_FOOD_FAIL_MAX)
@@ -299,6 +374,14 @@ class DecisionEngine:
                 for hunter in hunters:
                     if agent is not hunter:
                         _adjust_relationship(agent, hunter.name, -0.03)
+
+            # The same low-yield lesson also applies to consolation foraging.
+            if consolation_food < float(n):
+                msgs.append(
+                    "Foraging barely feeds the group; morale slips a little more."
+                )
+                for agent in living:
+                    agent.morale = max(0.0, agent.morale - 1.0)
         return msgs
 
     def _do_repair(

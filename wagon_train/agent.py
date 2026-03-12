@@ -120,11 +120,59 @@ class Agent:
 
     @property
     def effective_influence(self) -> float:
+        """Return baseline dynamic influence without world-context boosts.
+
+        ELI5:
+        - This is the old/simple influence model kept for compatibility.
+        - It only looks at this person's current health and morale.
+        - Vote collection can optionally call `effective_influence_for_world`
+          when it wants role-context boosts ("needed right now" behavior).
+        """
         if not self.alive:
             return 0.0
         health_factor = self._health / 100.0
         morale_factor = self._morale / 100.0
         return self.influence * (0.5 * health_factor + 0.5 * morale_factor)
+
+    def effective_influence_for_world(self, world: "WagonTrain") -> float:  # noqa: F821
+        """Return influence with moderate context-sensitive role boosts.
+
+        ELI5:
+        - People should be heard a bit more when their specialty is urgently
+          needed (doctor when sick, mechanic when wagon is failing, etc.).
+        - We keep boosts moderate so no role can fully dominate voting.
+        """
+        base = self.effective_influence
+        if base <= 0.0:
+            return 0.0
+
+        boost_multiplier = 1.0
+
+        # Hunter service is "needed" when food is low.
+        # Moderate boost: +20%.
+        if self.role == Role.HUNTER and world.food_supply < 30.0:
+            boost_multiplier += 0.20
+
+        # Mechanic service is "needed" when parts are low or an urgent repair
+        # assignment exists in the world.
+        # Moderate boost: +25%.
+        if self.role == Role.MECHANIC and (
+            world.wagon_parts < 40.0 or world.urgent_repair_assignee is not None
+        ):
+            boost_multiplier += 0.25
+
+        # Medic service is "needed" when sickness is active.
+        # Moderate boost: +25%.
+        if self.role == Role.MEDIC and world.sickness_count > 0:
+            boost_multiplier += 0.25
+
+        # Preacher service is "needed" on Sunday, where they guide rest and
+        # morale recovery rhythm.
+        # Moderate boost: +20%.
+        if self.role == Role.PREACHER and world.is_sunday:
+            boost_multiplier += 0.20
+
+        return base * boost_multiplier
 
     # ------------------------------------------------------------------
     # Relationship system
@@ -289,26 +337,55 @@ class Agent:
         progress_urgency = world.miles_needed_per_remaining_day
         behind_schedule_ratio = progress_urgency / max(0.1, world.REQUIRED_MILES_PER_DAY)
 
+        # Landmark urgency context:
+        # ELI5: when a fort is very close, we should push hard to reach it,
+        # because it can resupply and stabilize the run.
+        distance_to_next_landmark = world.distance_to_next_landmark
+        next_landmark_is_fort = world.is_fort_stop(world.next_landmark)
+
         # Each low-progress day should make movement actions more appealing.
         # ELI5: this is a "we are getting stuck" alarm that gets louder each day.
         stall_pressure = min(9.0, world.low_progress_streak * 1.35)
+
+        # Stagnation panic boost:
+        # ELI5: after 3+ low-progress days in a row, add a strong extra push
+        # toward travel so we break out of repeated maintenance/hunt loops.
+        stagnation_travel_boost = 2.0 if world.low_progress_streak >= 3 else 0.0
 
         # Non-travel pressure applies only when behind schedule.
         # ELI5: if we are late, we put a small "cost" on actions that do not move us.
         # This is intentionally capped so survival actions can still win when truly needed.
         non_travel_pressure = min(3.0, max(0.0, behind_schedule_ratio - 1.0) * 2.0 + world.low_progress_streak * 0.18)
 
+        # Fort-proximity urgency bias for travel:
+        # - medium bump under 120 miles
+        # - larger bump under 80 miles
+        # - strongest bump under 40 miles
+        # These stack so the urgency rises quickly as a fort gets close.
+        fort_travel_urgency = 0.0
+        if next_landmark_is_fort:
+            if distance_to_next_landmark < 120.0:
+                fort_travel_urgency += 1.5
+            if distance_to_next_landmark < 80.0:
+                fort_travel_urgency += 2.5
+            if distance_to_next_landmark < 40.0:
+                fort_travel_urgency += 4.0
+
+        # Lightly reduce non-travel action appeal near a fort because
+        # supplies/repairs are coming soon if we just keep moving.
+        fort_non_travel_penalty = 0.5 if next_landmark_is_fort else 0.0
+
         score_map = {
             # Travel and ford are the two direct progress actions, so they absorb
             # the strongest boost from schedule pressure + stalling pressure.
-            Action.TRAVEL: 5.2 + min(8.8, progress_urgency * 0.9) + stall_pressure,
+            Action.TRAVEL: 5.2 + min(8.8, progress_urgency * 0.9) + stall_pressure + stagnation_travel_boost + fort_travel_urgency + (1.0 if next_landmark_is_fort else 0.0),
             Action.FORD_RIVER: 4.2 + (2.2 if world.river_ahead else -3.0) + stall_pressure,
 
             # Non-progress actions keep their survival/resource benefits,
             # then receive a small late-schedule penalty.
             Action.REST: (2.2 + (4.0 if self._health < 50 else 0.0)) - non_travel_pressure,
-            Action.HUNT: (2.6 + (4.6 if world.food_supply < 25 else 0.0)) - non_travel_pressure,
-            Action.REPAIR_WAGON: (2.5 + (4.0 if world.wagon_parts < 30 else 0.0)) - non_travel_pressure,
+            Action.HUNT: (2.6 + (4.6 if world.food_supply < 25 else 0.0)) - non_travel_pressure - fort_non_travel_penalty,
+            Action.REPAIR_WAGON: (2.5 + (4.0 if world.wagon_parts < 30 else 0.0)) - non_travel_pressure - fort_non_travel_penalty,
             Action.RATION_FOOD: (1.6 + (3.7 if world.food_supply < 20 else 0.0)) - non_travel_pressure,
         }
         return score_map[action]

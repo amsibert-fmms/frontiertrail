@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wagon_train.agent import Agent, Role, Traits
 from wagon_train.world import LANDMARKS, TRAIL_DESTINATION, TRAIL_STOPS, WagonTrain, Weather
-from wagon_train.decisions import Action, DecisionEngine
+from wagon_train.decisions import Action, DecisionEngine, HUNT_FOOD_FAIL_MIN
 from wagon_train.events import EventSystem
 from wagon_train.logger import SimulationLogger
 from wagon_train.simulation import Simulation, build_default_party
@@ -80,6 +80,18 @@ class TestAgent:
         a = self._make_agent()
         a.alive = False
         assert a.effective_influence == 0.0
+
+    def test_effective_influence_for_world_boosts_needed_roles(self):
+        # ELI5: specialists should get a moderate influence bump when their
+        # specialty is needed in the current world state.
+        world = WagonTrain()
+        medic = Agent("Medic", Role.MEDIC, Traits())
+        baseline = medic.effective_influence_for_world(world)
+
+        world.sickness_events.append("Fever")
+        boosted = medic.effective_influence_for_world(world)
+
+        assert boosted > baseline
 
     def test_repr(self):
         a = self._make_agent()
@@ -165,6 +177,42 @@ class TestAgent:
         action = a.propose_action(world)
         assert action == Action.TRAVEL
 
+    def test_stagnation_panic_adds_travel_bias_after_three_low_progress_days(self):
+        # ELI5: once low progress happens 3 days in a row, travel should get
+        # an explicit scoring bonus so the group is more likely to break loops.
+        world = WagonTrain()
+        a = Agent("Traveler", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5), morale=60.0)
+
+        world.low_progress_streak = 2
+        score_before = a._action_score(world, Action.TRAVEL)
+        world.low_progress_streak = 3
+        score_after = a._action_score(world, Action.TRAVEL)
+
+        assert score_after >= score_before + 2.0
+
+    def test_fort_proximity_bias_increases_travel_and_reduces_hunt_and_repair(self):
+        # ELI5: when a fort is the next stop and very close, travel should gain
+        # urgency while hunt/repair become slightly less appealing.
+        world = WagonTrain()
+        a = Agent("Traveler", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5), morale=60.0)
+
+        # Fort Kearny is at mile 320, so 300 miles traveled means 20 miles away.
+        world.miles_traveled = 300.0
+        travel_score = a._action_score(world, Action.TRAVEL)
+        hunt_score = a._action_score(world, Action.HUNT)
+        repair_score = a._action_score(world, Action.REPAIR_WAGON)
+
+        # Move back far enough that the next stop is still Fort Kearny but outside
+        # all urgency thresholds.
+        world.miles_traveled = 180.0
+        far_travel_score = a._action_score(world, Action.TRAVEL)
+        far_hunt_score = a._action_score(world, Action.HUNT)
+        far_repair_score = a._action_score(world, Action.REPAIR_WAGON)
+
+        assert travel_score > far_travel_score
+        assert hunt_score < far_hunt_score
+        assert repair_score < far_repair_score
+
     def test_urgent_repair_assignee_forces_repair_vote(self):
         world = WagonTrain()
         a = Agent("Fixer", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
@@ -239,6 +287,17 @@ class TestWagonTrain:
         world = WagonTrain()
         # At the very start, the first stop ahead should be Kansas River Crossing.
         assert world.next_landmark == "Kansas River Crossing"
+
+    def test_distance_to_next_landmark_tracks_remaining_miles(self):
+        world = WagonTrain()
+        # Kansas River Crossing is 102 miles from the start.
+        assert world.distance_to_next_landmark == 102.0
+
+        world.miles_traveled = 100.0
+        assert world.distance_to_next_landmark == 2.0
+
+        world.miles_traveled = world.GOAL_MILES
+        assert world.distance_to_next_landmark == 0.0
 
         # At exactly 102 miles, we should now be aiming for Big Blue River Crossing.
         world.miles_traveled = 102.0
@@ -413,6 +472,91 @@ class TestDecisionEngine:
         avg_health = sum(a.health for a in party) / len(party)
         assert avg_health > 50.0
 
+    def test_travel_passive_hunter_food_and_mechanic_repairs_apply(self, monkeypatch):
+        # ELI5: on travel days hunters should gather a little food and mechanics
+        # should recover a little wagon condition without spending a full action.
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.river_ahead = False
+        world.weather = Weather.SUNNY
+        world.food_supply = 100.0
+        world.wagon_parts = 50.0
+        party = [
+            Agent("Hunter1", Role.HUNTER, Traits()),
+            Agent("Hunter2", Role.HUNTER, Traits()),
+            Agent("Mech", Role.MECHANIC, Traits()),
+        ]
+
+        # Keep travel-distance randomness deterministic.
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.TRAVEL, party, world)
+
+        assert any("trail food" in msg for msg in outcomes)
+        assert any("rolling maintenance" in msg for msg in outcomes)
+        # Net food rises by +3.0 trail food then is reduced by travel consumption 4.5.
+        assert world.food_supply == pytest.approx(98.5, abs=0.01)
+        # +2 maintenance from one mechanic.
+        assert world.wagon_parts >= 52.0
+
+    def test_rest_with_medic_increases_healing_rate(self, monkeypatch):
+        # ELI5: medics should make each rest day heal more than non-medic rests.
+        engine = DecisionEngine()
+        world = WagonTrain()
+        with_medic = [
+            Agent("Medic", Role.MEDIC, Traits(), health=50.0),
+            Agent("Traveler", Role.PASSENGER, Traits(), health=50.0),
+        ]
+        without_medic = [
+            Agent("Traveler1", Role.PASSENGER, Traits(), health=50.0),
+            Agent("Traveler2", Role.PASSENGER, Traits(), health=50.0),
+        ]
+
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        engine.apply_action(Action.REST, with_medic, world)
+        healed_with_medic = sum(a.health for a in with_medic) / len(with_medic)
+
+        world2 = WagonTrain()
+        engine.apply_action(Action.REST, without_medic, world2)
+        healed_without_medic = sum(a.health for a in without_medic) / len(without_medic)
+
+        assert healed_with_medic > healed_without_medic
+
+    def test_preacher_adds_morale_on_successful_sunday_rest(self, monkeypatch):
+        # ELI5: when Sunday rest is chosen and a preacher is present, morale gets
+        # a visible extra bump.
+        engine = DecisionEngine()
+        world = WagonTrain(start_year=1848)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+        world.morale = 60.0
+        party = [
+            Agent("Preacher", Role.PREACHER, Traits(), morale=50.0),
+            Agent("Traveler", Role.PASSENGER, Traits(), morale=50.0),
+        ]
+
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.REST, party, world)
+
+        assert any("Sunday rest with preacher support" in msg for msg in outcomes)
+        assert world.morale > 63.0
+
+    def test_collect_votes_uses_contextual_influence_boosts(self):
+        # ELI5: medic should cast a bigger vote when sickness is active.
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.sickness_events.append("Illness")
+
+        medic = Agent("Medic", Role.MEDIC, Traits())
+        passenger = Agent("Passenger", Role.PASSENGER, Traits())
+
+        # Force both to vote REST so the tally is a simple sum.
+        medic.propose_action = lambda w: Action.REST  # type: ignore[method-assign]
+        passenger.propose_action = lambda w: Action.REST  # type: ignore[method-assign]
+
+        tally = engine.collect_votes([medic, passenger], world)
+        assert tally[Action.REST] > medic.effective_influence + passenger.effective_influence
+
     def test_work_on_sunday_applies_half_rest_penalty(self, monkeypatch):
         engine = DecisionEngine()
         world = WagonTrain(start_year=1848)
@@ -442,6 +586,24 @@ class TestDecisionEngine:
         engine.apply_action(Action.HUNT, party, world)
         # Food may increase or not — just ensure it doesn't go negative
         assert world.food_supply >= 0.0
+
+
+    def test_hunt_low_yield_applies_extra_morale_penalty(self, monkeypatch):
+        # ELI5: if hunt yield is smaller than party size, morale should dip a
+        # little extra so the AI learns this is not a good repeated strategy.
+        engine = DecisionEngine()
+        world = WagonTrain()
+        party = [Agent(f"A{i}", Role.PASSENGER, Traits()) for i in range(5)]
+        for a in party:
+            a.morale = 50.0
+
+        # Force failed hunt with tiny consolation food below party size.
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        monkeypatch.setattr(random, "uniform", lambda a, b: 4.6 if a == HUNT_FOOD_FAIL_MIN else (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.HUNT, party, world)
+
+        assert any("barely feeds" in msg for msg in outcomes)
+        assert sum(a.morale for a in party) / len(party) < 48.5
 
     def test_hunt_failure_still_adds_small_food(self, monkeypatch):
         # Force hunt failure and verify consolation foraging food is added.
@@ -657,7 +819,7 @@ class TestSimulationLogger:
 class TestSimulation:
     def test_build_default_party(self):
         party = build_default_party()
-        assert len(party) == 10
+        assert len(party) == 20
         roles = {a.role for a in party}
         assert Role.LEADER in roles
         assert Role.HUNTER in roles
