@@ -80,6 +80,10 @@ EVENT_CATALOGUE: List[dict] = [
         "morale_delta": -6,
         "sickness": False,
         "miles_delta": -5,
+        "injure_draft_animal": True,
+        # Not every injury permanently removes an animal from service.
+        # This keeps attrition meaningful without guaranteeing hard collapse.
+        "injure_draft_animal_loss_chance": 0.4,
     },
     {
         "name": "Abandoned Cache",
@@ -262,6 +266,44 @@ class EventSystem:
                 world.miles_traveled += miles_delta
             else:
                 messages.append("  Progress stalls for the day due to the incident.")
+
+        # Draft-animal injury handling.
+        # ELI5: this removes one pulling animal, which slows future travel,
+        # and can later force harder starvation choices.
+        if event_data.get("injure_draft_animal"):
+            # Allow scenarios/tests to override permanent-loss probability.
+            loss_chance = float(event_data.get("injure_draft_animal_loss_chance", 0.4))
+            lost_animal = False
+            if world.oxen_count > 0:
+                injured_type = "ox"
+                if random.random() < loss_chance:
+                    world.oxen_count -= 1
+                    lost_animal = True
+            elif world.horse_count > 0:
+                injured_type = "horse"
+                if random.random() < loss_chance:
+                    world.horse_count -= 1
+                    lost_animal = True
+            elif world.mule_count > 0:
+                injured_type = "mule"
+                if random.random() < loss_chance:
+                    world.mule_count -= 1
+                    lost_animal = True
+            else:
+                injured_type = None
+
+            if injured_type is not None:
+                # ELI5: either we permanently lose that animal (future speed hit),
+                # or it recovers enough to stay in harness after today's delay.
+                if lost_animal:
+                    messages.append(
+                        f"  A {injured_type} is lost from the team: "
+                        "future travel speed is reduced."
+                    )
+                else:
+                    messages.append(
+                        f"  A {injured_type} is injured; the team slows today but keeps moving."
+                    )
 
         # Apply health delta
         health_delta = event_data.get("health_delta", 0)
