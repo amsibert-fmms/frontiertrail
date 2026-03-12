@@ -265,6 +265,11 @@ class DecisionEngine:
         self._buy_supplies_at_fort_if_possible(world, msgs)
 
         modifier = world.travel_modifier
+        # Terrain factor (new first-pass model):
+        # - Plains tend to be fastest.
+        # - Mountains/desert slow the same wagon setup down.
+        # - This stacks with weather instead of replacing weather.
+        terrain_factor = world.terrain_speed_modifier
         # Wagon-parts factor:
         # - Old model punished low parts very harshly.
         # - New model keeps a floor so the party is slowed, not frozen.
@@ -276,14 +281,25 @@ class DecisionEngine:
         # ELI5: slightly stronger captain pace bonus helps late-game consistency,
         # especially on seeds that previously stalled just short of Oregon.
         captain_bonus = 1.0 + (0.06 * sum(1 for a in living if a.role == Role.CAPTAIN))
-        miles = TRAVEL_BASE_MILES * modifier * parts_factor * animal_factor * captain_bonus
+        miles = (
+            TRAVEL_BASE_MILES
+            * modifier
+            * terrain_factor
+            * parts_factor
+            * animal_factor
+            * captain_bonus
+        )
         miles *= random.uniform(0.8, 1.2)  # ±20% random variation
         world.miles_traveled += miles
         # Track speed for derived metric (rolling 7-day window)
         world._recent_miles.append(miles)
         if len(world._recent_miles) > 7:
             world._recent_miles.pop(0)
-        msgs.append(f"The wagon train travels {miles:.1f} miles ({world.weather.value} weather).")
+        msgs.append(
+            "The wagon train travels "
+            f"{miles:.1f} miles "
+            f"({world.weather.value} weather, {world.terrain_segment_name} terrain)."
+        )
 
         # Fatigue: slight health / morale cost
         for agent in living:

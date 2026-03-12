@@ -11,7 +11,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wagon_train.agent import Agent, Role, Traits
-from wagon_train.world import LANDMARKS, TRAIL_DESTINATION, TRAIL_STOPS, WagonTrain, Weather
+from wagon_train.world import (
+    LANDMARKS,
+    TERRAIN_SPEED_SEGMENTS,
+    TRAIL_DESTINATION,
+    TRAIL_STOPS,
+    WagonTrain,
+    Weather,
+)
 from wagon_train.decisions import Action, DecisionEngine, HUNT_FOOD_FAIL_MIN
 from wagon_train.events import EventSystem
 from wagon_train.logger import SimulationLogger
@@ -455,6 +462,38 @@ class TestWagonTrain:
         world = WagonTrain(weather=Weather.STORMY)
         assert world.travel_modifier < 1.0
 
+    def test_terrain_speed_modifier_uses_segment_ranges(self):
+        world = WagonTrain()
+
+        # ELI5: right after starting, we are in plains terrain.
+        world.miles_traveled = 10.0
+        assert world.terrain_segment_name == "plains"
+        assert world.terrain_speed_modifier == pytest.approx(1.0)
+
+        # ELI5: around South Pass / Rocky region, travel should slow.
+        world.miles_traveled = 950.0
+        assert world.terrain_segment_name == "mountains"
+        assert world.terrain_speed_modifier == pytest.approx(0.82)
+
+        # ELI5: farther west through desert-like terrain, still slower.
+        world.miles_traveled = 1450.0
+        assert world.terrain_segment_name == "desert"
+        assert world.terrain_speed_modifier == pytest.approx(0.78)
+
+        # ELI5: late trail forests recover slightly versus desert.
+        world.miles_traveled = 1750.0
+        assert world.terrain_segment_name == "forests"
+        assert world.terrain_speed_modifier == pytest.approx(0.9)
+
+    def test_terrain_segments_do_not_overlap_and_cover_positive_miles(self):
+        # ELI5: this protects against misconfigured segment tables.
+        # We validate ranges are ordered and have positive width.
+        previous_end = 0.0
+        for _name, start_mile, end_mile, _multiplier in TERRAIN_SPEED_SEGMENTS:
+            assert start_mile >= previous_end
+            assert end_mile > start_mile
+            previous_end = end_mile
+
     def test_food_days_remaining(self):
         world = WagonTrain()
         world.food_supply = 15.0
@@ -862,6 +901,30 @@ class TestDecisionEngine:
         assert world_without_animals.miles_traveled < world_with_animals.miles_traveled
         assert any("travels" in m for m in msgs_full)
         assert any("travels" in m for m in msgs_reduced)
+
+    def test_travel_speed_drops_in_mountain_segment_vs_plains(self):
+        engine = DecisionEngine()
+        party = [Agent("A", Role.PASSENGER, Traits())]
+
+        # ELI5: same people, same weather, same wagon condition.
+        # Only terrain position changes, so miles should be lower in mountains.
+        plains_world = WagonTrain()
+        plains_world.weather = Weather.SUNNY
+        plains_world.miles_traveled = 100.0
+
+        mountains_world = WagonTrain()
+        mountains_world.weather = Weather.SUNNY
+        mountains_world.miles_traveled = 1000.0
+
+        random.seed(456)
+        _ = engine._do_travel(party, plains_world, len(party))
+        random.seed(456)
+        msgs_mountain = engine._do_travel(party, mountains_world, len(party))
+
+        plains_daily = plains_world._recent_miles[-1]
+        mountain_daily = mountains_world._recent_miles[-1]
+        assert mountain_daily < plains_daily
+        assert any("terrain" in msg for msg in msgs_mountain)
 
     def test_repair_clears_urgent_repair_assignment(self):
         engine = DecisionEngine()

@@ -162,6 +162,31 @@ WEATHER_TRAVEL_MODIFIER: dict[Weather, float] = {
     Weather.HOT: 0.85,
 }
 
+# Terrain-speed configuration by cumulative mile marker.
+#
+# ELI5:
+# - The trail is not equally easy the whole way.
+# - We split the route into broad terrain "zones".
+# - Each zone gives a speed multiplier that stacks with weather and wagon state.
+#
+# Tuple format is:
+#   (segment_name, start_mile_inclusive, end_mile_exclusive, speed_multiplier)
+#
+# Why broad ranges instead of tiny per-stop tuning?
+# - First pass keeps balancing simple and easy to reason about.
+# - We can later refine ranges if telemetry shows a rough edge.
+TERRAIN_SPEED_SEGMENTS: list[tuple[str, float, float, float]] = [
+    # Open plains and established approaches are comparatively fast travel.
+    ("plains", 0.0, 900.0, 1.0),
+    # Rocky and high-pass regions usually slow heavy wagons down.
+    ("mountains", 900.0, 1350.0, 0.82),
+    # Sage/desert stretches are harsh on people and draft teams.
+    ("desert", 1350.0, 1700.0, 0.78),
+    # Forested and river-heavy final approach is difficult but not as punishing
+    # as high mountain passes.
+    ("forests", 1700.0, float("inf"), 0.9),
+]
+
 # Probability of transitioning to each weather state (simple Markov weights)
 _WEATHER_TRANSITIONS: dict[Weather, dict[Weather, float]] = {
     Weather.SUNNY: {
@@ -377,6 +402,35 @@ class WagonTrain:
     def draft_animal_count(self) -> int:
         """Return total number of remaining draft animals."""
         return self.oxen_count + self.horse_count + self.mule_count
+
+    @property
+    def terrain_segment_name(self) -> str:
+        """Return the active broad terrain segment for current progress.
+
+        ELI5:
+        - We look at how many cumulative miles have been traveled.
+        - Then we find which predefined terrain range contains that mile value.
+        - If a custom scenario somehow lands outside all ranges, we safely
+          fall back to "plains" behavior.
+        """
+        for segment_name, start_mile, end_mile, _speed in TERRAIN_SPEED_SEGMENTS:
+            if start_mile <= self.miles_traveled < end_mile:
+                return segment_name
+        return "plains"
+
+    @property
+    def terrain_speed_modifier(self) -> float:
+        """Return movement-speed multiplier for the active terrain segment.
+
+        ELI5:
+        - This is a "how hard is the ground today?" number.
+        - 1.0 means no extra slowdown.
+        - Smaller numbers mean slower progress for the same action.
+        """
+        for _segment_name, start_mile, end_mile, speed_multiplier in TERRAIN_SPEED_SEGMENTS:
+            if start_mile <= self.miles_traveled < end_mile:
+                return speed_multiplier
+        return 1.0
 
     @property
     def draft_power_multiplier(self) -> float:
