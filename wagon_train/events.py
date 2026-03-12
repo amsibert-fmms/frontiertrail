@@ -33,6 +33,7 @@ EVENT_CATALOGUE: List[dict] = [
         "health_delta": 0,
         "morale_delta": -5,
         "sickness": False,
+        "wagon_break": True,
     },
     {
         "name": "Dysentery Outbreak",
@@ -152,6 +153,7 @@ EVENT_CATALOGUE: List[dict] = [
         "health_delta": 0,
         "morale_delta": -4,
         "sickness": False,
+        "wagon_break": True,
     },
     {
         "name": "Cholera Scare",
@@ -253,7 +255,13 @@ class EventSystem:
             world.morale = max(0.0, min(100.0, world.morale + event_data["morale_delta"]))
 
         if event_data.get("miles_delta", 0):
-            world.miles_traveled = max(0.0, world.miles_traveled + event_data["miles_delta"])
+            miles_delta = event_data["miles_delta"]
+            # We never move backwards on the trail.
+            # Negative "miles" events now mean lost opportunity/time, not literal reverse travel.
+            if miles_delta > 0:
+                world.miles_traveled += miles_delta
+            else:
+                messages.append("  Progress stalls for the day due to the incident.")
 
         # Apply health delta
         health_delta = event_data.get("health_delta", 0)
@@ -276,5 +284,18 @@ class EventSystem:
         # Record sickness
         if event_data.get("sickness"):
             world.sickness_events.append(event_data["name"])
+
+        # Assign urgent wagon-repair responsibility on breakage events.
+        # We prefer mechanics when possible; otherwise pick a random living traveler.
+        if event_data.get("wagon_break") and living:
+            from .agent import Role
+
+            mechanic_candidates = [a for a in living if a.role == Role.MECHANIC]
+            assignee_pool = mechanic_candidates if mechanic_candidates else living
+            assignee = random.choice(assignee_pool)
+            world.urgent_repair_assignee = assignee.name
+            messages.append(
+                f"  Urgent task: {assignee.name} must coordinate immediate wagon repairs."
+            )
 
         return messages
