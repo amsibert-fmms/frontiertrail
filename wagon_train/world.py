@@ -253,6 +253,23 @@ class WagonTrain:
         return TRAIL_DESTINATION
 
     @property
+    def distance_to_next_landmark(self) -> float:
+        """Return remaining miles to the next stop ahead.
+
+        ELI5:
+        - We first ask, "what is the next named stop?"
+        - Then we subtract current miles from that stop's mile marker.
+        - If we are already at the finish, we return 0 (not negative).
+        """
+        next_stop_name = self.next_landmark
+        next_stop = STOP_BY_NAME.get(next_stop_name)
+        if next_stop is None:
+            return 0.0
+
+        next_stop_distance = float(next_stop["distance"])
+        return max(0.0, next_stop_distance - self.miles_traveled)
+
+    @property
     def current_or_last_stop(self) -> str:
         """Return the furthest stop reached at current mileage.
 
