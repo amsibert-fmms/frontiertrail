@@ -227,6 +227,34 @@ class TestAgent:
         cook = Agent("Rev", Role.COOK, Traits(0.5, 0.5, 0.5, 0.5), health=95.0, morale=80.0)
         assert cook.role == Role.COOK
 
+    def test_agents_start_with_route_destination_intent(self):
+        # ELI5: each traveler starts with a destination in mind before voting.
+        traveler = Agent("Traveler", Role.PASSENGER, Traits(0.6, 0.5, 0.5, 0.5))
+        assert traveler.intended_route in {"oregon", "california"}
+
+    def test_exceptional_hunger_can_shift_route_preference_to_california(self):
+        # ELI5: this traveler starts Oregon-leaning, but severe hunger can flip
+        # to a shorter-path preference in our model.
+        world = WagonTrain()
+        world.living_count = 1
+        world.food_supply = 2.0
+        medic = Agent("Medic", Role.MEDIC, Traits(0.2, 0.5, 0.1, 0.5), hunger=90.0)
+        medic.intended_route = "oregon"
+
+        assert medic.preferred_trail(world) == "california"
+
+    def test_sickness_and_exhaustion_shift_preference_to_oregon(self):
+        # ELI5: even California-leaning travelers should pick easier routing
+        # when very sick and exhausted.
+        world = WagonTrain()
+        world.sickness_events = ["fever", "infection"]
+        world.morale = 35.0
+        scout = Agent("Scout", Role.SCOUT, Traits(0.9, 0.5, 0.1, 0.5), health=30.0, morale=20.0)
+        scout.intended_route = "california"
+
+        assert scout.preferred_trail(world) == "oregon"
+
+
 
 # ---------------------------------------------------------------------------
 # World / WagonTrain tests
@@ -267,17 +295,28 @@ class TestWagonTrain:
         world.advance_day()
         assert world.day == 1
 
-    def test_calendar_starts_mar_1_and_year_is_in_requested_range(self):
+    def test_calendar_starts_in_apr_or_may_and_year_is_in_requested_range(self):
         world = WagonTrain()
         world.advance_day()
-        assert world.current_date.month == 3
+        assert world.current_date.month in (4, 5)
         assert world.current_date.day == 1
-        assert 1840 <= world.current_date.year <= 1860
+        assert 1841 <= world.current_date.year <= 1860
 
     def test_start_year_can_be_forced_for_deterministic_date(self):
-        world = WagonTrain(start_year=1851)
+        world = WagonTrain(start_year=1851, start_month=4)
         world.advance_day()
-        assert world.current_date == date(1851, 3, 1)
+        assert world.current_date == date(1851, 4, 1)
+
+    def test_invalid_start_month_raises(self):
+        with pytest.raises(ValueError):
+            WagonTrain(start_month=3)
+
+    def test_infrastructure_safety_factor_improves_in_later_years(self):
+        # ELI5: later trail years should have better crossing safety due to
+        # more ferries/bridges and shared route knowledge.
+        early = WagonTrain(start_year=1842, start_month=4)
+        late = WagonTrain(start_year=1855, start_month=4)
+        assert late.infrastructure_safety_factor < early.infrastructure_safety_factor
 
     def test_advance_day_reduces_food(self):
         world = WagonTrain()
@@ -377,6 +416,19 @@ class TestWagonTrain:
         world.miles_traveled = 1700
         assert world.current_or_last_stop == "Blue Mountains"
         assert world.at_landmark_stop
+
+
+    def test_trail_choice_switches_route_context(self):
+        world = WagonTrain()
+        # ELI5: reaching Soda Springs should unlock the branch vote.
+        world.miles_traveled = 1180.0
+        assert world.needs_trail_choice
+
+        world.apply_trail_choice("california")
+
+        assert world.trail_choice_made
+        assert world.active_route == "california"
+        assert world.next_landmark == "Bear River Divide"
 
     def test_is_finished_on_days(self):
         world = WagonTrain()
@@ -598,6 +650,91 @@ class TestDecisionEngine:
         tally = engine.collect_votes([medic, passenger], world)
         assert tally[Action.REST] > medic.effective_influence + passenger.effective_influence
 
+
+    def test_seeded_route_sweep_shifts_with_distress_profile(self):
+        # ELI5: this is a small, deterministic sweep to prove tuning direction:
+        # - extreme hunger should increase California outcomes
+        # - sickness/exhaustion should increase Oregon outcomes
+        engine = DecisionEngine()
+        from wagon_train.simulation import build_default_party
+
+        hunger_choices = {"oregon": 0, "california": 0, "split": 0}
+        sickness_choices = {"oregon": 0, "california": 0, "split": 0}
+
+        for seed in range(20):
+            random.seed(seed)
+            hungry_party = build_default_party()
+            sick_party = build_default_party()
+
+            hungry_world = WagonTrain()
+            hungry_world.living_count = len(hungry_party)
+            hungry_world.food_supply = len(hungry_party) * 1.5 * 1.2
+            hungry_world.morale = 55.0
+
+            sick_world = WagonTrain()
+            sick_world.living_count = len(sick_party)
+            sick_world.food_supply = len(sick_party) * 1.5 * 10.0
+            sick_world.morale = 35.0
+            sick_world.sickness_events = ["fever", "dysentery"]
+
+            for agent in hungry_party:
+                agent.hunger = 85.0
+            for agent in sick_party:
+                agent.health = 32.0
+                agent.morale = 22.0
+
+            hunger_route, _, _ = engine.resolve_trail_choice(hungry_party, hungry_world)
+            sickness_route, _, _ = engine.resolve_trail_choice(sick_party, sick_world)
+
+            hunger_choices[hunger_route] += 1
+            sickness_choices[sickness_route] += 1
+
+        assert hunger_choices["california"] > hunger_choices["oregon"]
+        assert sickness_choices["oregon"] > sickness_choices["california"]
+
+    def test_split_route_vote_follows_more_influential_party(self):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        agents = [
+            Agent(
+                "StrongSplit",
+                Role.CAPTAIN,
+                Traits(0.2, 0.5, 0.2, 0.9),
+                influence=10.0,
+            ),
+            Agent(
+                "CalScout",
+                Role.SCOUT,
+                Traits(0.8, 0.5, 0.5, 0.4),
+                influence=2.0,
+            ),
+            Agent(
+                "CalHunter",
+                Role.HUNTER,
+                Traits(0.8, 0.5, 0.5, 0.4),
+                influence=2.0,
+            ),
+            Agent(
+                "OregonMedic",
+                Role.MEDIC,
+                Traits(0.2, 0.5, 0.5, 0.4),
+                influence=8.0,
+            ),
+        ]
+
+        # Keep trust neutral for deterministic weighting.
+        for a in agents:
+            for b in agents:
+                if a is not b:
+                    a.relationships[b.name] = 0.5
+
+        chosen_route, tally, message = engine.resolve_trail_choice(agents, world)
+
+        assert tally["split"] > tally["oregon"]
+        assert tally["split"] > tally["california"]
+        assert chosen_route == "oregon"
+        assert "split party" in message
+
     def test_work_on_sunday_applies_half_rest_penalty(self, monkeypatch):
         engine = DecisionEngine()
         world = WagonTrain(start_year=1848)
@@ -617,6 +754,21 @@ class TestDecisionEngine:
         assert any("half rest" in msg for msg in outcomes)
         assert sum(a.health for a in party) / len(party) < 90.0
         assert sum(a.morale for a in party) / len(party) < 80.0
+
+    def test_crossing_safety_bonus_message_appears_on_ford(self, monkeypatch):
+        # ELI5: if we have temporary crossing safety intel, ford messaging should
+        # reflect reduced danger context.
+        engine = DecisionEngine()
+        world = WagonTrain(start_year=1855, start_month=4)
+        world.river_ahead = True
+        world.crossing_safety_days = 3
+        party = [Agent("Scout", Role.SCOUT, Traits())]
+
+        # Keep deterministic path through the method.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        outcomes = engine.apply_action(Action.FORD_RIVER, party, world)
+
+        assert any("reduce river danger" in msg for msg in outcomes)
 
     def test_hunt_may_add_food(self):
         random.seed(42)
@@ -881,6 +1033,70 @@ class TestEventSystem:
         messages = es.roll(world, party)
         assert world.oxen_count == 0
         assert any("future travel speed is reduced" in msg for msg in messages)
+
+    def test_warning_markers_event_sets_disease_warning_days(self):
+        es = EventSystem()
+        world = WagonTrain()
+        party = [Agent("Passenger", Role.PASSENGER, Traits())]
+        synthetic = {
+            "name": "Trailside Warning Markers",
+            "description": "Testing warning marker effect.",
+            "food_delta": 0,
+            "parts_delta": 0,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "sickness": False,
+            "warning_markers": True,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+
+        es.roll(world, party)
+        assert world.disease_warning_days >= 6
+
+    def test_disease_warning_reduces_sickness_event_impact(self):
+        es = EventSystem()
+        world = WagonTrain()
+        world.disease_warning_days = 3
+        party = [
+            Agent("A", Role.PASSENGER, Traits(), health=100.0),
+            Agent("B", Role.PASSENGER, Traits(), health=100.0),
+        ]
+        synthetic = {
+            "name": "Dysentery Outbreak",
+            "description": "Testing warning mitigation.",
+            "food_delta": 0,
+            "parts_delta": 0,
+            "health_delta": -15,
+            "morale_delta": -10,
+            "sickness": True,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+
+        es.roll(world, party)
+        # Mitigated health loss should be 78% of 15 = 11.7, truncated to 11.
+        assert all(a.health == pytest.approx(89.0) for a in party)
+
+    def test_crossing_safety_event_sets_bonus_days(self):
+        es = EventSystem()
+        world = WagonTrain()
+        party = [Agent("Passenger", Role.PASSENGER, Traits())]
+        synthetic = {
+            "name": "New Ferry and Bridge Crossing",
+            "description": "Testing crossing safety intel.",
+            "food_delta": 0,
+            "parts_delta": 0,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "sickness": False,
+            "crossing_safety": True,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+
+        es.roll(world, party)
+        assert world.crossing_safety_days >= 5
 
 
 # ---------------------------------------------------------------------------
