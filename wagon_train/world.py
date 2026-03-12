@@ -206,6 +206,8 @@ class WagonTrain:
         self._initial_mule_count: int = self.mule_count
         self.weather: Weather = weather
         self.morale: float = 80.0          # group morale (0-100)
+        # Shared party funds used to buy supplies at forts.
+        self.cash: float = 0.0
         self.sickness_events: List[str] = []
         # Track who (if anyone) is urgently responsible for fixing wagon damage.
         # This is set by severe breakage events and cleared after a repair action.
@@ -495,6 +497,7 @@ class WagonTrain:
             f"Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
             f"Food: {self.food_supply:>5.1f} ({food_days_str}) | "
             f"Parts: {self.wagon_parts:>5.1f} ({self.wagon_condition*100:.0f}%) | "
+            f"Cash: ${self.cash:>5.1f} | "
             f"Animals: O{self.oxen_count}/H{self.horse_count}/M{self.mule_count} | "
             f"Weather: {self.weather.value:<7} | Morale: {self.morale:>4.0f} | "
             f"Next: {self.next_landmark}{river_str}"

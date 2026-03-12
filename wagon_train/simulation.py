@@ -12,6 +12,13 @@ from .logger import SimulationLogger
 from .world import WagonTrain
 
 
+# ELI5: every passenger buys a ticket to join the wagon train.
+# We convert those fares into a shared cash pool for fort resupply.
+# ELI5: we reduced the ticket price a little so fort shopping helps,
+# but does not trivialize supply pressure for the whole trip.
+PASSENGER_FARE_DOLLARS = 20.0
+
+
 # ---------------------------------------------------------------------------
 # Default party roster
 # ---------------------------------------------------------------------------
@@ -24,25 +31,25 @@ def build_default_party() -> List[Agent]:
     - Main entrypoint now allows selecting 10-20 travelers from this roster.
     """
     party = [
-        Agent("Eliza Hart",    Role.LEADER,    Traits(0.5, 0.7, 0.6, 0.8)),
+        Agent("Eliza Hart",    Role.CAPTAIN,    Traits(0.5, 0.7, 0.6, 0.8)),
         Agent("Tom Buckley",   Role.HUNTER,    Traits(0.8, 0.4, 0.5, 0.5)),
         Agent("Clara Quinn",   Role.MEDIC,     Traits(0.3, 0.9, 0.4, 0.9)),
-        Agent("Amos Reed",     Role.MECHANIC,  Traits(0.4, 0.5, 0.7, 0.6)),
+        Agent("Amos Reed",     Role.WHEELWRIGHT,  Traits(0.4, 0.5, 0.7, 0.6)),
         Agent("Jesse Fox",     Role.SCOUT,     Traits(0.7, 0.4, 0.3, 0.5)),
         Agent("Mae Cooper",    Role.PASSENGER, Traits(0.4, 0.6, 0.5, 0.7)),
-        Agent("Old Pete",      Role.PASSENGER, Traits(0.2, 0.5, 0.8, 0.4)),
-        Agent("Rev. Silas Boone", Role.PREACHER, Traits(0.2, 0.8, 0.7, 0.9)),
+        Agent("Old Pete",      Role.HOSTLER, Traits(0.2, 0.5, 0.8, 0.4)),
+        Agent("Silas Boone", Role.COOK, Traits(0.2, 0.8, 0.7, 0.9)),
         Agent("Ruby Dalton",   Role.PASSENGER, Traits(0.5, 0.7, 0.4, 0.8)),
         Agent("Caleb Stone",   Role.HUNTER,    Traits(0.7, 0.3, 0.6, 0.4)),
         Agent("Nora Pike",     Role.PASSENGER, Traits(0.4, 0.6, 0.5, 0.6)),
-        Agent("Elias Ward",    Role.MECHANIC,  Traits(0.4, 0.5, 0.6, 0.5)),
+        Agent("Elias Ward",    Role.BLACKSMITH,  Traits(0.4, 0.5, 0.6, 0.5)),
         Agent("Hattie Sloan",  Role.MEDIC,     Traits(0.3, 0.9, 0.4, 0.8)),
         Agent("Micah Graves",  Role.SCOUT,     Traits(0.7, 0.4, 0.3, 0.5)),
         Agent("June Holloway", Role.PASSENGER, Traits(0.5, 0.7, 0.5, 0.7)),
-        Agent("Wyatt Dunn",    Role.HUNTER,    Traits(0.8, 0.3, 0.5, 0.4)),
+        Agent("Wyatt Dunn",    Role.GUARD,    Traits(0.8, 0.3, 0.5, 0.4)),
         Agent("Abigail Frost", Role.PASSENGER, Traits(0.4, 0.7, 0.5, 0.7)),
         Agent("Jonah Webb",    Role.PASSENGER, Traits(0.4, 0.6, 0.6, 0.6)),
-        Agent("Martha Bell",   Role.PREACHER,  Traits(0.2, 0.8, 0.7, 0.9)),
+        Agent("Martha Bell",   Role.GUARD,  Traits(0.2, 0.8, 0.7, 0.9)),
         Agent("Gideon Marsh",  Role.PASSENGER, Traits(0.4, 0.5, 0.6, 0.6)),
     ]
     return party
@@ -70,6 +77,9 @@ class Simulation:
         self.engine = DecisionEngine()
         self.events = EventSystem()
         self.logger = SimulationLogger(log_to_stdout=log_to_stdout)
+        # ELI5: passengers bring ticket money that can later be spent at forts.
+        passenger_count = sum(1 for a in self.agents if a.role == Role.PASSENGER)
+        self.world.cash += passenger_count * PASSENGER_FARE_DOLLARS
 
         # Initialise pairwise relationships at neutral trust (0.5)
         for agent in self.agents:

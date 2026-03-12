@@ -332,8 +332,10 @@ class EventSystem:
         if event_data.get("wagon_break") and living:
             from .agent import Role
 
-            mechanic_candidates = [a for a in living if a.role == Role.MECHANIC]
-            assignee_pool = mechanic_candidates if mechanic_candidates else living
+            repair_candidates = [
+                a for a in living if a.role in (Role.WHEELWRIGHT, Role.BLACKSMITH)
+            ]
+            assignee_pool = repair_candidates if repair_candidates else living
             assignee = random.choice(assignee_pool)
             world.urgent_repair_assignee = assignee.name
             messages.append(
