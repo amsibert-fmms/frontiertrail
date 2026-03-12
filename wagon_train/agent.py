@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -15,6 +15,7 @@ class Role(str, Enum):
     MECHANIC = "mechanic"
     SCOUT = "scout"
     PASSENGER = "passenger"
+    PREACHER = "preacher"
 
 
 # Base influence scores by role
@@ -25,6 +26,7 @@ _ROLE_BASE_INFLUENCE: dict[Role, float] = {
     Role.MECHANIC: 2.0,
     Role.SCOUT: 1.5,
     Role.PASSENGER: 1.0,
+    Role.PREACHER: 1.2,
 }
 
 
@@ -137,6 +139,13 @@ class Agent:
         # they should immediately advocate for repair until the team handles it.
         if world.urgent_repair_assignee == self.name:
             return Action.REPAIR_WAGON
+
+        # Religious archetype behavior:
+        # - This traveler strongly prefers full-group rest on Sundays.
+        # - We still allow survival overrides so the AI does not make obviously
+        #   catastrophic choices (for example refusing to hunt when food is gone).
+        if self.role == Role.PREACHER and world.is_sunday and not self._critical_survival_state(world):
+            return Action.REST
 
         # Role-specific tendencies
         if self.role == Role.HUNTER and world.food_supply < 30:

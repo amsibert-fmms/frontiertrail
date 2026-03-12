@@ -3,6 +3,7 @@
 import sys
 import os
 import random
+from datetime import date
 
 import pytest
 
@@ -123,6 +124,14 @@ class TestAgent:
         world.urgent_repair_assignee = "Fixer"
         assert a.propose_action(world) == Action.REPAIR_WAGON
 
+    def test_preacher_prefers_rest_on_sunday_when_stable(self):
+        world = WagonTrain(start_year=1843)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+        preacher = Agent("Rev", Role.PREACHER, Traits(0.5, 0.5, 0.5, 0.5), health=95.0, morale=80.0)
+        assert preacher.propose_action(world) == Action.REST
+
 
 # ---------------------------------------------------------------------------
 # World / WagonTrain tests
@@ -141,6 +150,18 @@ class TestWagonTrain:
         world = WagonTrain()
         world.advance_day()
         assert world.day == 1
+
+    def test_calendar_starts_mar_1_and_year_is_in_requested_range(self):
+        world = WagonTrain()
+        world.advance_day()
+        assert world.current_date.month == 3
+        assert world.current_date.day == 1
+        assert 1840 <= world.current_date.year <= 1860
+
+    def test_start_year_can_be_forced_for_deterministic_date(self):
+        world = WagonTrain(start_year=1851)
+        world.advance_day()
+        assert world.current_date == date(1851, 3, 1)
 
     def test_advance_day_reduces_food(self):
         world = WagonTrain()
@@ -315,6 +336,26 @@ class TestDecisionEngine:
         avg_health = sum(a.health for a in party) / len(party)
         assert avg_health > 50.0
 
+    def test_work_on_sunday_applies_half_rest_penalty(self, monkeypatch):
+        engine = DecisionEngine()
+        world = WagonTrain(start_year=1848)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+
+        party = self._make_party()
+        for a in party:
+            a.health = 90.0
+            a.morale = 80.0
+
+        # Keep numbers deterministic for stable assertions.
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.TRAVEL, party, world)
+
+        assert any("half rest" in msg for msg in outcomes)
+        assert sum(a.health for a in party) / len(party) < 90.0
+        assert sum(a.morale for a in party) / len(party) < 80.0
+
     def test_hunt_may_add_food(self):
         random.seed(42)
         engine = DecisionEngine()
@@ -482,6 +523,7 @@ class TestSimulation:
         assert Role.MECHANIC in roles
         assert Role.SCOUT in roles
         assert Role.PASSENGER in roles
+        assert Role.PREACHER in roles
 
     def test_simulation_terminates(self):
         """Simulation should always terminate within 200 days."""

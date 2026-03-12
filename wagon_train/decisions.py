@@ -37,8 +37,33 @@ FOOD_PER_PERSON_PER_DAY = 1.5
 HUNT_FOOD_MIN = 30.0
 HUNT_FOOD_MAX = 70.0
 # If hunting fails, the party can still forage a small amount.
-HUNT_FOOD_FAIL_MIN = 5.0
-HUNT_FOOD_FAIL_MAX = 12.0
+HUNT_FOOD_FAIL_MIN = 4.0
+HUNT_FOOD_FAIL_MAX = 10.0
+
+# Hunt success tuning (Pass 3A):
+# We keep these as named constants so balancing can iterate safely without
+# rewriting core hunt logic each pass.
+#
+# ELI5:
+# - BASE = how likely any party is to find food at all.
+# - PER_HUNTER = how much each hunter helps at first.
+# - EXTRA_HUNTER = how much hunters beyond the first two still help,
+#   but at a smaller "diminishing returns" amount.
+# - CAP = never let hunt become near-guaranteed.
+HUNT_SUCCESS_BASE = 0.30
+HUNT_SUCCESS_PER_HUNTER = 0.18
+HUNT_SUCCESS_EXTRA_HUNTER = 0.10
+HUNT_SUCCESS_DIMINISH_AFTER = 2
+HUNT_SUCCESS_CAP = 0.86
+
+# Sunday work penalty model.
+# ELI5: if the group chooses to work on Sunday, they miss a chunk of weekly
+# recovery. We model that as a small health/morale hit equivalent to giving up
+# about half a rest day.
+SUNDAY_WORK_HEALTH_LOSS_MIN = 1.5
+SUNDAY_WORK_HEALTH_LOSS_MAX = 4.0
+SUNDAY_WORK_MORALE_LOSS_MIN = 1.0
+SUNDAY_WORK_MORALE_LOSS_MAX = 3.0
 
 # Parts restored by a repair action
 REPAIR_PARTS_RESTORE = 20.0
@@ -120,6 +145,12 @@ class DecisionEngine:
         elif action == Action.FORD_RIVER:
             outcomes.extend(self._do_ford(living, world, n))
 
+        # Sunday-rest rule:
+        # If the party works on Sunday, we allow it (no hard lock-out), but we
+        # apply a half-rest penalty to represent missed recovery time.
+        if world.is_sunday and action != Action.REST:
+            outcomes.extend(self._apply_sunday_work_penalty(living))
+
         # Always consume some food (modified by action)
         outcomes.extend(self._consume_food(living, world, action))
 
@@ -178,11 +209,25 @@ class DecisionEngine:
         # Find the best hunter(s)
         from .agent import Role
         hunters = [a for a in living if a.role == Role.HUNTER]
-        # Hunting success model:
-        # - still rewards having hunters,
-        # - but no near-guaranteed outcomes with a small number of specialists.
-        skill = 0.3 + len(hunters) * 0.2
-        success_chance = min(0.9, skill)
+
+        # Hunting success model (Pass 3A):
+        # We intentionally rebalance hunt to avoid very high reliability that can
+        # dominate decision-making and trap the party in hunt-heavy loops.
+        #
+        # ELI5 of the formula:
+        # 1) Everybody gets a small base chance.
+        # 2) First two hunters add stronger value.
+        # 3) Hunters after the second still help, but less (diminishing returns).
+        # 4) A hard cap prevents near-guaranteed hunts.
+        hunter_count = len(hunters)
+        primary_hunters = min(hunter_count, HUNT_SUCCESS_DIMINISH_AFTER)
+        extra_hunters = max(0, hunter_count - HUNT_SUCCESS_DIMINISH_AFTER)
+        skill = (
+            HUNT_SUCCESS_BASE
+            + primary_hunters * HUNT_SUCCESS_PER_HUNTER
+            + extra_hunters * HUNT_SUCCESS_EXTRA_HUNTER
+        )
+        success_chance = min(HUNT_SUCCESS_CAP, skill)
 
         # Weather affects hunt reliability and yields.
         # Bad weather means less activity/visibility and harder tracking.
@@ -314,6 +359,28 @@ class DecisionEngine:
         else:
             for agent in living:
                 agent.hunger = max(0.0, agent.hunger - FOOD_PER_PERSON_PER_DAY * factor * 5)
+        return msgs
+
+    def _apply_sunday_work_penalty(self, living: List["Agent"]) -> List[str]:
+        """Apply reduced-rest costs when the group works on Sunday.
+
+        ELI5:
+        - Working on Sunday is allowed.
+        - But workers lose the equivalent of about half a rest day.
+        - That means a small immediate health/morale decline.
+        """
+        msgs = [
+            "Sunday work continues, but everyone only gets half rest and feels more worn down.",
+        ]
+        for agent in living:
+            agent.health -= random.uniform(
+                SUNDAY_WORK_HEALTH_LOSS_MIN,
+                SUNDAY_WORK_HEALTH_LOSS_MAX,
+            )
+            agent.morale -= random.uniform(
+                SUNDAY_WORK_MORALE_LOSS_MIN,
+                SUNDAY_WORK_MORALE_LOSS_MAX,
+            )
         return msgs
 
     # ------------------------------------------------------------------
