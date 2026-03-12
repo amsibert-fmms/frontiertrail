@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Dict, List, Optional
 
 
 class Role(str, Enum):
@@ -81,6 +81,8 @@ class Agent:
             influence if influence is not None else _ROLE_BASE_INFLUENCE[role]
         )
         self.alive: bool = True
+        # Trust scores toward other agents by name: 0.0 = distrust, 0.5 = neutral, 1.0 = full trust
+        self.relationships: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Properties with clamping
@@ -173,6 +175,29 @@ class Agent:
         return base * boost_multiplier
 
     # ------------------------------------------------------------------
+    # Relationship system
+    # ------------------------------------------------------------------
+
+    def get_relationship_modifier(self, living: List["Agent"]) -> float:
+        """Return a multiplier reflecting how much trust this agent has earned.
+
+        The modifier is the average trust score that all other living agents
+        hold toward this agent, remapped from [0, 1] → [0.5, 1.5].
+        A neutral starting trust (0.5) maps to a modifier of 1.0 (no change).
+        """
+        others = [a for a in living if a is not self and a.alive]
+        if not others:
+            return 1.0
+        trust_scores = [a.relationships.get(self.name, 0.5) for a in others]
+        avg_trust = sum(trust_scores) / len(trust_scores)
+        return 0.5 + avg_trust  # [0, 1] trust → [0.5, 1.5] modifier
+
+    def update_relationship(self, other_name: str, delta: float) -> None:
+        """Adjust trust toward another agent by *delta*, clamped to [0.0, 1.0]."""
+        current = self.relationships.get(other_name, 0.5)
+        self.relationships[other_name] = max(0.0, min(1.0, current + delta))
+
+    # ------------------------------------------------------------------
     # Action proposal
     # ------------------------------------------------------------------
 
@@ -183,6 +208,8 @@ class Agent:
         if not self.alive:
             return Action.REST
 
+        # Role-specific tendencies (use food_days_remaining for smarter forecasting)
+        if self.role == Role.HUNTER and world.food_days_remaining < 5:
         # If this traveler has been explicitly assigned an urgent wagon repair,
         # they should immediately advocate for repair until the team handles it.
         if world.urgent_repair_assignee == self.name:
@@ -206,11 +233,9 @@ class Agent:
             return Action.REST
 
         if self.role == Role.SCOUT:
-            # Scouts prefer travelling; lead the ford when river is ahead
+            # Scouts prefer travelling; choose crossing method based on risk tolerance
             if world.river_ahead:
-                if self.traits.risk_tolerance >= 0.4:
-                    return Action.FORD_RIVER
-                return Action.REST
+                return self._scout_river_decision(world)
             return Action.TRAVEL
 
         if self.role == Role.LEADER:
@@ -220,28 +245,53 @@ class Agent:
         base_action = self._generic_decision(world)
         return self._apply_progress_bias(world, base_action)
 
-    def _leader_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
+    def _scout_river_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
+        """Scouts choose a river-crossing strategy based on risk tolerance."""
         from .decisions import Action
 
-        if world.food_supply < 20:
-            return Action.HUNT if random.random() < 0.5 else Action.RATION_FOOD
-        if world.wagon_parts < 20:
-            return Action.REPAIR_WAGON
-        if world.river_ahead:
-            if self.traits.risk_tolerance >= 0.5:
-                return Action.FORD_RIVER
-            return Action.REST  # wait and assess
-        # Leaders now also apply the same strategic pacing check so their
-        # vote can push the group out of passive loops when behind schedule.
-        return self._apply_progress_bias(world, Action.TRAVEL)
+        rt = self.traits.risk_tolerance
+        if rt >= 0.7:
+            return Action.FORD_RIVER
+        if rt >= 0.4:
+            return Action.CAULK_WAGON
+        if rt >= 0.2:
+            return Action.FERRY_ACROSS
+        return Action.WAIT_AT_RIVER
+
+    def _leader_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
+      from .decisions import Action
+
+      # Food emergency
+      if world.food_days_remaining < 5:
+          return Action.HUNT if random.random() < 0.5 else Action.RATION_FOOD
+
+      # Critical wagon damage
+      if world.wagon_parts < 20:
+          return Action.REPAIR_WAGON
+
+      # River decision
+      if world.river_ahead:
+          rt = self.traits.risk_tolerance
+
+          if rt >= 0.6:
+              return Action.FORD_RIVER
+          if rt >= 0.4:
+              return Action.CAULK_WAGON
+          if rt >= 0.2 and world.food_days_remaining >= 5:
+              return Action.FERRY_ACROSS
+
+          return Action.WAIT_AT_RIVER
+
+      # Default behavior: travel, but allow pacing logic to modify it
+      return self._apply_progress_bias(world, Action.TRAVEL)
 
     def _generic_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
         from .decisions import Action
 
-        # Starving agents push to hunt / ration
+        # Starving agents push to hunt / ration based on days of food remaining
         if self._hunger > 70:
             return Action.RATION_FOOD
-        if world.food_supply < 15 and random.random() < 0.6:
+        if world.food_days_remaining < 3 and random.random() < 0.6:
             return Action.HUNT
 
         # Low health agents rest
@@ -250,9 +300,12 @@ class Agent:
 
         # River decision based on risk tolerance
         if world.river_ahead:
-            if self.traits.risk_tolerance > 0.6:
+            rt = self.traits.risk_tolerance
+            if rt > 0.6:
                 return Action.FORD_RIVER
-            return Action.REST
+            if rt > 0.4:
+                return Action.CAULK_WAGON
+            return Action.WAIT_AT_RIVER
 
         # Default: travel or rest based on morale
         if self._morale < 30:

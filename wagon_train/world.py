@@ -105,6 +105,9 @@ STOP_BY_NAME: Dict[str, dict[str, object]] = {
     str(stop["name"]): stop for stop in TRAIL_STOPS
 }
 
+# Food consumed per person per day (shared constant used by agents and decisions)
+FOOD_PER_PERSON_PER_DAY: float = 1.5
+
 
 class Weather(str, Enum):
     SUNNY = "sunny"
@@ -201,6 +204,10 @@ class WagonTrain:
         self._days_until_river: int = random.randint(5, 15)
         self._event_log: List[str] = []    # events that happened today
 
+        # Derived-metric support
+        self.living_count: int = 0         # updated by simulation each day
+        self.avg_health: float = 100.0     # updated by decision engine each day
+        self._recent_miles: List[float] = []  # rolling buffer of daily travel miles
         # Calendar model for log readability:
         # - Every run starts on March 1st (as requested).
         # - The year is intentionally randomized to keep each run feeling like
@@ -238,6 +245,28 @@ class WagonTrain:
         return self.miles_traveled >= self.GOAL_MILES or self.day >= self.MAX_DAYS
 
     @property
+    def food_days_remaining(self) -> float:
+        """Days of food left at current consumption rate.
+
+        Returns ``inf`` when no living agents are tracked (e.g., before the
+        first simulation step or after everyone has perished).
+        """
+        if self.living_count <= 0:
+            return float("inf")
+        daily = self.living_count * FOOD_PER_PERSON_PER_DAY
+        return self.food_supply / daily
+
+    @property
+    def wagon_condition(self) -> float:
+        """Wagon health as a fraction 0.0–1.0 (1.0 = full parts)."""
+        return self.wagon_parts / 100.0
+
+    @property
+    def recent_travel_speed(self) -> float:
+        """Average miles per day over the last 7 travel days."""
+        if not self._recent_miles:
+            return 0.0
+        return sum(self._recent_miles) / len(self._recent_miles)
     def next_landmark(self) -> str:
         """Return the next named stop ahead of current progress.
 
@@ -387,7 +416,13 @@ class WagonTrain:
 
     def summary(self) -> str:
         river_str = " [RIVER AHEAD]" if self.river_ahead else ""
+        food_days = self.food_days_remaining
+        food_days_str = f"{food_days:.1f}d" if food_days != float("inf") else "---"
         return (
+            f"Day {self.day:>3} | Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
+            f"Food: {self.food_supply:>5.1f} ({food_days_str}) | "
+            f"Parts: {self.wagon_parts:>5.1f} ({self.wagon_condition*100:.0f}%) | "
+            f"Weather: {self.weather.value:<7} | Morale: {self.morale:>4.0f}{river_str}"
             f"Day {self.day:>3} ({self.current_date.strftime('%b %d, %Y')}) | "
             f"Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
             f"Food: {self.food_supply:>5.1f} | Parts: {self.wagon_parts:>5.1f} | "

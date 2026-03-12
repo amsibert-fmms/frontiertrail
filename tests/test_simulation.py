@@ -107,11 +107,21 @@ class TestAgent:
 
     def test_hunter_proposes_hunt_when_food_low(self):
         world = WagonTrain()
-        world.food_supply = 10.0
+        world.food_supply = 4.0   # 4 / (1 * 1.5) ≈ 2.7 days < 5 threshold
+        world.living_count = 1
         a = Agent("Hunter", Role.HUNTER, Traits(0.5, 0.5, 0.5, 0.5))
-        # A hunter should suggest hunting with low food supply
+        # A hunter should suggest hunting when only ~2-3 days of food remain
         action = a.propose_action(world)
         assert action == Action.HUNT
+
+    def test_hunter_proposes_hunt_when_food_sufficient(self):
+        world = WagonTrain()
+        world.food_supply = 500.0  # many days of food remaining
+        world.living_count = 10
+        a = Agent("Hunter", Role.HUNTER, Traits(0.5, 0.5, 0.5, 0.5))
+        # With plenty of food (>5 days), hunter should NOT immediately hunt
+        action = a.propose_action(world)
+        assert action != Action.HUNT
 
     def test_mechanic_proposes_repair_when_parts_low(self):
         world = WagonTrain()
@@ -120,6 +130,43 @@ class TestAgent:
         action = a.propose_action(world)
         assert action == Action.REPAIR_WAGON
 
+    def test_relationships_initialized_empty(self):
+        a = Agent("Test", Role.PASSENGER, Traits())
+        assert isinstance(a.relationships, dict)
+        assert len(a.relationships) == 0  # empty until initialised by Simulation
+
+    def test_relationship_modifier_neutral(self):
+        a = Agent("Alice", Role.LEADER, Traits())
+        b = Agent("Bob", Role.HUNTER, Traits())
+        c = Agent("Carol", Role.MEDIC, Traits())
+        # Bob and Carol both have neutral (0.5) trust toward Alice
+        b.relationships["Alice"] = 0.5
+        c.relationships["Alice"] = 0.5
+        modifier = a.get_relationship_modifier([a, b, c])
+        assert abs(modifier - 1.0) < 1e-6  # neutral trust → 1.0 modifier
+
+    def test_relationship_modifier_high_trust(self):
+        a = Agent("Alice", Role.LEADER, Traits())
+        b = Agent("Bob", Role.HUNTER, Traits())
+        b.relationships["Alice"] = 1.0  # full trust
+        modifier = a.get_relationship_modifier([a, b])
+        assert modifier == 1.5  # max modifier
+
+    def test_relationship_modifier_low_trust(self):
+        a = Agent("Alice", Role.LEADER, Traits())
+        b = Agent("Bob", Role.HUNTER, Traits())
+        b.relationships["Alice"] = 0.0  # full distrust
+        modifier = a.get_relationship_modifier([a, b])
+        assert modifier == 0.5  # min modifier
+
+    def test_update_relationship_clamps(self):
+        a = Agent("Alice", Role.LEADER, Traits())
+        a.update_relationship("Bob", 0.3)
+        assert a.relationships["Bob"] == pytest.approx(0.8)
+        a.update_relationship("Bob", 0.5)
+        assert a.relationships["Bob"] == 1.0  # clamped at max
+        a.update_relationship("Bob", -2.0)
+        assert a.relationships["Bob"] == 0.0  # clamped at min
     def test_progress_bias_prefers_travel_when_behind_schedule(self):
         # When the group is very behind schedule and not in emergency survival
         # territory, normal passengers should lean toward progress actions.
@@ -335,6 +382,28 @@ class TestWagonTrain:
         world = WagonTrain(weather=Weather.STORMY)
         assert world.travel_modifier < 1.0
 
+    def test_food_days_remaining(self):
+        world = WagonTrain()
+        world.food_supply = 15.0
+        world.living_count = 10  # 10 * 1.5 = 15 food/day → 1 day remaining
+        assert abs(world.food_days_remaining - 1.0) < 1e-6
+
+    def test_food_days_remaining_zero_people(self):
+        world = WagonTrain()
+        world.food_supply = 100.0
+        world.living_count = 0  # no living agents → infinite days
+        assert world.food_days_remaining == float("inf")
+
+    def test_wagon_condition(self):
+        world = WagonTrain()
+        world.wagon_parts = 50.0
+        assert world.wagon_condition == pytest.approx(0.5)
+        world.wagon_parts = 100.0
+        assert world.wagon_condition == pytest.approx(1.0)
+
+    def test_recent_travel_speed_empty(self):
+        world = WagonTrain()
+        assert world.recent_travel_speed == 0.0
     def test_miles_needed_per_remaining_day_is_positive(self):
         world = WagonTrain()
         world.day = 100
@@ -384,6 +453,14 @@ class TestDecisionEngine:
         initial_miles = world.miles_traveled
         engine.apply_action(Action.TRAVEL, party, world)
         assert world.miles_traveled > initial_miles
+
+    def test_travel_tracks_recent_speed(self):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        party = self._make_party()
+        assert world.recent_travel_speed == 0.0
+        engine.apply_action(Action.TRAVEL, party, world)
+        assert world.recent_travel_speed > 0.0
 
     def test_rest_increases_health(self):
         engine = DecisionEngine()
@@ -584,6 +661,71 @@ class TestDecisionEngine:
         assert not world.river_ahead
         assert world.miles_traveled >= initial_miles
 
+    def test_wait_at_river_keeps_river_ahead(self):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.river_ahead = True
+        party = self._make_party()
+        engine.apply_action(Action.WAIT_AT_RIVER, party, world)
+        assert world.river_ahead  # river should still be there after waiting
+
+    def test_caulk_wagon_crosses_river(self):
+        random.seed(0)  # seed that avoids caulk failure
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.river_ahead = True
+        world.wagon_parts = 100.0
+        party = self._make_party()
+        engine.apply_action(Action.CAULK_WAGON, party, world)
+        assert not world.river_ahead  # river crossed regardless of success/failure
+
+    def test_ferry_across_crosses_river(self):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.river_ahead = True
+        world.food_supply = 200.0  # enough to pay for ferry
+        party = self._make_party()
+        food_before = world.food_supply
+        engine.apply_action(Action.FERRY_ACROSS, party, world)
+        assert not world.river_ahead
+        # Ferry should cost food (after daily consumption)
+        assert world.food_supply < food_before
+
+    def test_ferry_falls_back_to_ford_when_food_low(self):
+        random.seed(1)
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.river_ahead = True
+        world.food_supply = 1.0  # too low to pay for ferry
+        party = self._make_party()
+        engine.apply_action(Action.FERRY_ACROSS, party, world)
+        assert not world.river_ahead  # river still crossed via ford fallback
+
+    def test_relationships_affect_vote_weight(self):
+        """Agents with high trust earn more influence in voting."""
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.river_ahead = False
+        leader = Agent("Leader", Role.LEADER, Traits(0.5, 0.7, 0.6, 0.8))
+        follower = Agent("Follower", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
+        # Follower highly trusts leader
+        follower.relationships["Leader"] = 1.0
+        party = [leader, follower]
+        tally_high = engine.collect_votes(party, world)
+
+        leader2 = Agent("Leader", Role.LEADER, Traits(0.5, 0.7, 0.6, 0.8))
+        follower2 = Agent("Follower", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
+        # Follower distrusts leader2
+        follower2.relationships["Leader"] = 0.0
+        party2 = [leader2, follower2]
+        tally_low = engine.collect_votes(party2, world)
+
+        # Leader should have higher weighted vote when trusted
+        leader_action_high = leader.propose_action(world)
+        leader_action_low = leader2.propose_action(world)
+        if leader_action_high == leader_action_low:
+            assert tally_high.get(leader_action_high, 0) > tally_low.get(leader_action_low, 0)
+
 
 # ---------------------------------------------------------------------------
 # Event system tests
@@ -686,6 +828,14 @@ class TestSimulation:
         assert Role.SCOUT in roles
         assert Role.PASSENGER in roles
         assert Role.PREACHER in roles
+
+    def test_simulation_initializes_relationships(self):
+        sim = Simulation(seed=1, log_to_stdout=False)
+        for agent in sim.agents:
+            for other in sim.agents:
+                if other is not agent:
+                    assert other.name in agent.relationships
+                    assert agent.relationships[other.name] == 0.5
 
     def test_simulation_terminates(self):
         """Simulation should always terminate within 200 days."""

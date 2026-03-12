@@ -71,6 +71,12 @@ class Simulation:
         self.events = EventSystem()
         self.logger = SimulationLogger(log_to_stdout=log_to_stdout)
 
+        # Initialise pairwise relationships at neutral trust (0.5)
+        for agent in self.agents:
+            for other in self.agents:
+                if other is not agent:
+                    agent.relationships.setdefault(other.name, 0.5)
+
     # ------------------------------------------------------------------
     # Main run loop
     # ------------------------------------------------------------------
@@ -83,6 +89,9 @@ class Simulation:
                 reason = "All travelers have perished."
                 self.logger.log_simulation_end(self.world, self.agents, reason)
                 return reason
+
+            # Update living count so world can compute derived metrics
+            self.world.living_count = len(living)
 
             # 1. Advance day (weather, spoilage, wear)
             self.world.advance_day()

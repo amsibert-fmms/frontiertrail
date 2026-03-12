@@ -7,9 +7,17 @@ from collections import Counter
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, List, Tuple
 
+from .world import FOOD_PER_PERSON_PER_DAY
+
 if TYPE_CHECKING:
     from .agent import Agent
     from .world import WagonTrain
+
+
+def _adjust_relationship(agent: "Agent", other_name: str, delta: float) -> None:
+    """Clamp-safe adjustment of agent's trust toward another agent by name."""
+    current = agent.relationships.get(other_name, 0.5)
+    agent.relationships[other_name] = max(0.0, min(1.0, current + delta))
 
 
 class Action(str, Enum):
@@ -19,6 +27,9 @@ class Action(str, Enum):
     REPAIR_WAGON = "repair_wagon"
     RATION_FOOD = "ration_food"
     FORD_RIVER = "ford_river"
+    WAIT_AT_RIVER = "wait_at_river"
+    CAULK_WAGON = "caulk_wagon"
+    FERRY_ACROSS = "ferry_across"
 
 
 # ------------------------------------------------------------------
@@ -29,9 +40,6 @@ class Action(str, Enum):
 # We intentionally increased this baseline so that, after accounting for
 # non-travel days, weather, and setbacks, successful runs are actually feasible.
 TRAVEL_BASE_MILES = 32.0
-
-# Food consumed per person per day baseline
-FOOD_PER_PERSON_PER_DAY = 1.5
 
 # Food gained from a successful hunt (base range)
 HUNT_FOOD_MIN = 30.0
@@ -83,8 +91,14 @@ FORD_RISK_BASE = 0.5
 FORD_RISK_PER_SCOUT_REDUCTION = 0.1
 FORD_RISK_FLOOR = 0.08
 
+# Miles gained when fording / crossing a river
+FORD_MILES = 5.0
 # Miles gained when fording
 FORD_MILES = 12.0
+
+# Food cost of taking a ferry (simulates trading supplies)
+FERRY_COST_MIN = 10.0
+FERRY_COST_MAX = 20.0
 
 
 class DecisionEngine:
@@ -93,12 +107,19 @@ class DecisionEngine:
     def collect_votes(
         self, agents: List["Agent"], world: "WagonTrain"
     ) -> Dict[Action, float]:
-        """Return a mapping of action → total influence weight."""
+        """Return a mapping of action → total influence weight.
+
+        Each agent's effective influence is scaled by their relationship
+        modifier — a measure of how much trust they have earned from peers.
+        """
+        living = [a for a in agents if a.alive]
         tally: Dict[Action, float] = Counter()
         for agent in agents:
             if not agent.alive:
                 continue
             proposed = agent.propose_action(world)
+            modifier = agent.get_relationship_modifier(living)
+            tally[proposed] += agent.effective_influence * modifier
 
             # Use context-aware influence so role specialists get a moderate
             # voting bump when their service is urgently needed.
@@ -150,6 +171,14 @@ class DecisionEngine:
         elif action == Action.FORD_RIVER:
             outcomes.extend(self._do_ford(living, world, n))
 
+        elif action == Action.WAIT_AT_RIVER:
+            outcomes.extend(self._do_wait_river(living, world, n))
+
+        elif action == Action.CAULK_WAGON:
+            outcomes.extend(self._do_caulk(living, world, n))
+
+        elif action == Action.FERRY_ACROSS:
+            outcomes.extend(self._do_ferry(living, world, n))
         # Sunday-rest rule:
         # If the party works on Sunday, we allow it (no hard lock-out), but we
         # apply a half-rest penalty to represent missed recovery time.
@@ -188,6 +217,10 @@ class DecisionEngine:
         miles = TRAVEL_BASE_MILES * modifier * parts_factor
         miles *= random.uniform(0.8, 1.2)  # ±20% random variation
         world.miles_traveled += miles
+        # Track speed for derived metric (rolling 7-day window)
+        world._recent_miles.append(miles)
+        if len(world._recent_miles) > 7:
+            world._recent_miles.pop(0)
         msgs.append(f"The wagon train travels {miles:.1f} miles ({world.weather.value} weather).")
 
         # Fatigue: slight health / morale cost
@@ -309,6 +342,11 @@ class DecisionEngine:
             msgs.append(f"The hunt is successful! +{food_gained:.1f} lbs of food.")
             for agent in living:
                 agent.morale = min(100.0, agent.morale + 3.0)
+            # Hunters earn trust from the party
+            for agent in living:
+                for hunter in hunters:
+                    if agent is not hunter:
+                        _adjust_relationship(agent, hunter.name, +0.05)
 
             # Starvation-behavior feedback:
             # ELI5: if the group spends a whole day hunting but brings back less
@@ -331,6 +369,11 @@ class DecisionEngine:
             )
             for agent in living:
                 agent.morale = max(0.0, agent.morale - 2.0)
+            # Slight loss of trust in hunters
+            for agent in living:
+                for hunter in hunters:
+                    if agent is not hunter:
+                        _adjust_relationship(agent, hunter.name, -0.03)
 
             # The same low-yield lesson also applies to consolation foraging.
             if consolation_food < float(n):
@@ -406,10 +449,111 @@ class DecisionEngine:
                 f"The crossing was treacherous! Everyone lost health; "
                 f"{food_lost:.1f} lbs of food were lost."
             )
+            # Scouts lose trust after a dangerous ford
+            for agent in living:
+                for scout in scouts:
+                    if agent is not scout:
+                        _adjust_relationship(agent, scout.name, -0.05)
         else:
             msgs.append("The party fords the river safely!")
             for agent in living:
                 agent.morale = min(100.0, agent.morale + 5.0)
+            # Scouts earn trust for a safe crossing
+            for agent in living:
+                for scout in scouts:
+                    if agent is not scout:
+                        _adjust_relationship(agent, scout.name, +0.05)
+
+        world.miles_traveled += FORD_MILES
+        world.river_crossed()
+        return msgs
+
+    # ------------------------------------------------------------------
+    # New river crossing methods
+    # ------------------------------------------------------------------
+
+    def _do_wait_river(
+        self, living: List["Agent"], world: "WagonTrain", n: int
+    ) -> List[str]:
+        """Wait at the riverbank — scouts conditions and rests the party."""
+        msgs: List[str] = []
+        if not world.river_ahead:
+            return self._do_rest(living, world, n)
+        msgs.append(
+            "The party waits at the riverbank, scouting for a safer crossing opportunity."
+        )
+        for agent in living:
+            agent.health = min(100.0, agent.health + random.uniform(2.0, 5.0))
+            agent.morale = min(100.0, agent.morale + random.uniform(1.0, 3.0))
+        world.morale = min(100.0, world.morale + 1.0)
+        return msgs
+
+    def _do_caulk(
+        self, living: List["Agent"], world: "WagonTrain", n: int
+    ) -> List[str]:
+        """Caulk the wagon and float it across — moderate risk, no food cost."""
+        msgs: List[str] = []
+        if not world.river_ahead:
+            msgs.append("There is no river — the wagon continues.")
+            world.miles_traveled += FORD_MILES
+            return msgs
+
+        msgs.append("The party caulks the wagon and attempts to float across!")
+        from .agent import Role
+        scouts = [a for a in living if a.role == Role.SCOUT]
+        risk = max(0.1, 0.3 - len(scouts) * 0.05)
+
+        if random.random() < risk:
+            # Wagon takes on water — parts damaged
+            parts_lost = random.uniform(10.0, 25.0)
+            world.wagon_parts = max(0.0, world.wagon_parts - parts_lost)
+            world.morale = max(0.0, world.morale - 8.0)
+            for agent in living:
+                agent.health -= random.uniform(0.0, 10.0)
+            msgs.append(
+                f"The wagon nearly capsized! Parts damaged ({parts_lost:.1f} lost)."
+            )
+            for agent in living:
+                for scout in scouts:
+                    if agent is not scout:
+                        _adjust_relationship(agent, scout.name, -0.05)
+        else:
+            msgs.append("The wagon floats across without incident!")
+            for agent in living:
+                agent.morale = min(100.0, agent.morale + 3.0)
+            for agent in living:
+                for scout in scouts:
+                    if agent is not scout:
+                        _adjust_relationship(agent, scout.name, +0.05)
+
+        world.miles_traveled += FORD_MILES
+        world.river_crossed()
+        return msgs
+
+    def _do_ferry(
+        self, living: List["Agent"], world: "WagonTrain", n: int
+    ) -> List[str]:
+        """Pay for ferry passage — safe crossing but costs food supplies."""
+        msgs: List[str] = []
+        if not world.river_ahead:
+            msgs.append("There is no river — the wagon continues.")
+            world.miles_traveled += FORD_MILES
+            return msgs
+
+        ferry_cost = random.uniform(FERRY_COST_MIN, FERRY_COST_MAX)
+        if world.food_supply < ferry_cost:
+            msgs.append(
+                "The party cannot afford ferry passage — attempting to ford instead!"
+            )
+            return self._do_ford(living, world, n)
+
+        world.food_supply = max(0.0, world.food_supply - ferry_cost)
+        msgs.append(
+            f"The party trades {ferry_cost:.1f} lbs of supplies for ferry passage."
+        )
+        msgs.append("The ferry carries everyone safely across the river.")
+        for agent in living:
+            agent.morale = min(100.0, agent.morale + 5.0)
             # Safe crossing can also improve confidence and preserve equipment.
             world.morale = min(100.0, world.morale + 3.0)
             world.wagon_parts = min(100.0, world.wagon_parts + 2.0)
@@ -478,6 +622,9 @@ class DecisionEngine:
         avg_morale = (
             sum(a.morale for a in living) / len(living) if living else 0.0
         )
+        # Store derived metric on world for agent reasoning
+        world.avg_health = avg_health
+
         # Drift group morale toward average individual morale
         world.morale += (avg_morale - world.morale) * 0.1
 
