@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .agent import Agent, Role, Traits
 from .decisions import Action, DecisionEngine
 from .events import EventSystem
 from .logger import SimulationLogger
-from .world import WagonTrain, Weather
+from .world import WagonTrain
 
 
 # ---------------------------------------------------------------------------

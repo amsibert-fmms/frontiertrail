@@ -267,6 +267,7 @@ class WagonTrain:
         if not self._recent_miles:
             return 0.0
         return sum(self._recent_miles) / len(self._recent_miles)
+    @property
     def next_landmark(self) -> str:
         """Return the next named stop ahead of current progress.
 
