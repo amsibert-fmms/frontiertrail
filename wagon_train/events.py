@@ -175,8 +175,11 @@ class EventSystem:
     """Generates and applies random events each day."""
 
     # Probability that any event occurs on a given day.
-    # Lower than before to reduce relentless stacking penalties.
-    BASE_EVENT_CHANCE = 0.22
+    # ELI5: turning this knob up makes the journey feel less predictable,
+    # because more random good/bad things happen before the trip ends.
+    # We are increasing it in one small step to raise outcome variability
+    # without touching any other balancing system at the same time.
+    BASE_EVENT_CHANCE = 0.30
 
     def __init__(self) -> None:
         # Keep a tiny bit of memory so event selection can avoid
