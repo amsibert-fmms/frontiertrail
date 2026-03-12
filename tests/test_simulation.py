@@ -582,7 +582,6 @@ class TestDecisionEngine:
         engine = DecisionEngine()
         world = WagonTrain()
         party = [Agent("Hunter", Role.HUNTER, Traits())]
-        food_before = world.food_supply
         engine.apply_action(Action.HUNT, party, world)
         # Food may increase or not — just ensure it doesn't go negative
         assert world.food_supply >= 0.0
@@ -745,7 +744,6 @@ class TestEventSystem:
         for _ in range(100):
             world = WagonTrain()
             party = [Agent("A", Role.PASSENGER, Traits())]
-            before = world.food_supply
             es.roll(world, party)
             # Just verify no crashes and values stay non-negative
             assert world.food_supply >= 0.0

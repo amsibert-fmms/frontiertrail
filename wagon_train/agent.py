@@ -210,6 +210,9 @@ class Agent:
 
         # Role-specific tendencies (use food_days_remaining for smarter forecasting)
         if self.role == Role.HUNTER and world.food_days_remaining < 5:
+            # ELI5: hunters are our best chance to refill food quickly.
+            # If we have fewer than ~5 days of food left, prioritize hunting.
+            return Action.HUNT
         # If this traveler has been explicitly assigned an urgent wagon repair,
         # they should immediately advocate for repair until the team handles it.
         if world.urgent_repair_assignee == self.name:
@@ -259,31 +262,31 @@ class Agent:
         return Action.WAIT_AT_RIVER
 
     def _leader_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
-      from .decisions import Action
+        from .decisions import Action
 
-      # Food emergency
-      if world.food_days_remaining < 5:
-          return Action.HUNT if random.random() < 0.5 else Action.RATION_FOOD
+        # Food emergency
+        if world.food_days_remaining < 5:
+            return Action.HUNT if random.random() < 0.5 else Action.RATION_FOOD
 
-      # Critical wagon damage
-      if world.wagon_parts < 20:
-          return Action.REPAIR_WAGON
+        # Critical wagon damage
+        if world.wagon_parts < 20:
+            return Action.REPAIR_WAGON
 
-      # River decision
-      if world.river_ahead:
-          rt = self.traits.risk_tolerance
+        # River decision
+        if world.river_ahead:
+            rt = self.traits.risk_tolerance
 
-          if rt >= 0.6:
-              return Action.FORD_RIVER
-          if rt >= 0.4:
-              return Action.CAULK_WAGON
-          if rt >= 0.2 and world.food_days_remaining >= 5:
-              return Action.FERRY_ACROSS
+            if rt >= 0.6:
+                return Action.FORD_RIVER
+            if rt >= 0.4:
+                return Action.CAULK_WAGON
+            if rt >= 0.2 and world.food_days_remaining >= 5:
+                return Action.FERRY_ACROSS
 
-          return Action.WAIT_AT_RIVER
+            return Action.WAIT_AT_RIVER
 
-      # Default behavior: travel, but allow pacing logic to modify it
-      return self._apply_progress_bias(world, Action.TRAVEL)
+        # Default behavior: travel, but allow pacing logic to modify it
+        return self._apply_progress_bias(world, Action.TRAVEL)
 
     def _generic_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
         from .decisions import Action
@@ -312,7 +315,7 @@ class Agent:
             return Action.REST
         return Action.TRAVEL
 
-    def _critical_survival_state(self, world: "WagonTrain") -> bool:
+    def _critical_survival_state(self, world: "WagonTrain") -> bool:  # noqa: F821
         """Return True when survival needs are urgent enough to override pacing.
 
         In simple words: if we are in immediate danger, we should stabilize first.
@@ -387,6 +390,13 @@ class Agent:
             Action.HUNT: (2.6 + (4.6 if world.food_supply < 25 else 0.0)) - non_travel_pressure - fort_non_travel_penalty,
             Action.REPAIR_WAGON: (2.5 + (4.0 if world.wagon_parts < 30 else 0.0)) - non_travel_pressure - fort_non_travel_penalty,
             Action.RATION_FOOD: (1.6 + (3.7 if world.food_supply < 20 else 0.0)) - non_travel_pressure,
+            # Waiting is usually a low-progress move; it is only attractive
+            # when a river blocks us and risk tolerance is low.
+            Action.WAIT_AT_RIVER: (0.6 + (2.2 if world.river_ahead else -2.5)) - non_travel_pressure,
+            # Ferry is a moderate-risk progress option at rivers, but it costs food.
+            Action.FERRY_ACROSS: (2.4 + (2.0 if world.river_ahead else -2.0) - (1.2 if world.food_supply < 15 else 0.0)),
+            # Caulking is another river option with slight parts wear pressure.
+            Action.CAULK_WAGON: (2.2 + (2.0 if world.river_ahead else -2.0) - (0.6 if world.wagon_parts < 20 else 0.0)),
         }
         return score_map[action]
 
