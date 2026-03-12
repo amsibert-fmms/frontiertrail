@@ -9,24 +9,30 @@ from typing import Dict, List, Optional
 
 
 class Role(str, Enum):
-    LEADER = "leader"
+    CAPTAIN = "captain"
     HUNTER = "hunter"
     MEDIC = "medic"
-    MECHANIC = "mechanic"
+    WHEELWRIGHT = "wheelwright"
     SCOUT = "scout"
     PASSENGER = "passenger"
-    PREACHER = "preacher"
+    GUARD = "guard"
+    BLACKSMITH = "blacksmith"
+    HOSTLER = "hostler"
+    COOK = "cook"
 
 
 # Base influence scores by role
 _ROLE_BASE_INFLUENCE: dict[Role, float] = {
-    Role.LEADER: 3.0,
+    Role.CAPTAIN: 3.0,
     Role.HUNTER: 2.0,
     Role.MEDIC: 2.0,
-    Role.MECHANIC: 2.0,
+    Role.WHEELWRIGHT: 2.0,
     Role.SCOUT: 1.5,
     Role.PASSENGER: 1.0,
-    Role.PREACHER: 1.2,
+    Role.GUARD: 1.6,
+    Role.BLACKSMITH: 1.7,
+    Role.HOSTLER: 1.5,
+    Role.COOK: 1.4,
 }
 
 
@@ -153,10 +159,10 @@ class Agent:
         if self.role == Role.HUNTER and world.food_supply < 30.0:
             boost_multiplier += 0.20
 
-        # Mechanic service is "needed" when parts are low or an urgent repair
+        # Wheelwright service is "needed" when parts are low or an urgent repair
         # assignment exists in the world.
         # Moderate boost: +25%.
-        if self.role == Role.MECHANIC and (
+        if self.role == Role.WHEELWRIGHT and (
             world.wagon_parts < 40.0 or world.urgent_repair_assignee is not None
         ):
             boost_multiplier += 0.25
@@ -166,11 +172,14 @@ class Agent:
         if self.role == Role.MEDIC and world.sickness_count > 0:
             boost_multiplier += 0.25
 
-        # Preacher service is "needed" on Sunday, where they guide rest and
-        # morale recovery rhythm.
+        # Captain service is "needed" when morale is low.
         # Moderate boost: +20%.
-        if self.role == Role.PREACHER and world.is_sunday:
+        if self.role == Role.CAPTAIN and world.morale < 60.0:
             boost_multiplier += 0.20
+
+        # Cook service matters more when food pressure is high.
+        if self.role == Role.COOK and world.food_days_remaining < 6.0:
+            boost_multiplier += 0.15
 
         return base * boost_multiplier
 
@@ -218,18 +227,11 @@ class Agent:
         if world.urgent_repair_assignee == self.name:
             return Action.REPAIR_WAGON
 
-        # Religious archetype behavior:
-        # - This traveler strongly prefers full-group rest on Sundays.
-        # - We still allow survival overrides so the AI does not make obviously
-        #   catastrophic choices (for example refusing to hunt when food is gone).
-        if self.role == Role.PREACHER and world.is_sunday and not self._critical_survival_state(world):
-            return Action.REST
-
         # Role-specific tendencies
         if self.role == Role.HUNTER and world.food_supply < 30:
             return Action.HUNT
 
-        if self.role == Role.MECHANIC and world.wagon_parts < 30:
+        if self.role in (Role.WHEELWRIGHT, Role.BLACKSMITH) and world.wagon_parts < 30:
             return Action.REPAIR_WAGON
 
         if self.role == Role.MEDIC and world.sickness_count > 0:
@@ -241,8 +243,8 @@ class Agent:
                 return self._scout_river_decision(world)
             return Action.TRAVEL
 
-        if self.role == Role.LEADER:
-            return self._leader_decision(world)
+        if self.role == Role.CAPTAIN:
+            return self._captain_decision(world)
 
         # Generic decision based on traits
         base_action = self._generic_decision(world)
@@ -261,7 +263,7 @@ class Agent:
             return Action.FERRY_ACROSS
         return Action.WAIT_AT_RIVER
 
-    def _leader_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
+    def _captain_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
         from .decisions import Action
 
         # Food emergency

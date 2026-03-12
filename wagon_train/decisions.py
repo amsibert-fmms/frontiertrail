@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from .world import WagonTrain
 
 
+# ELI5: simple fort store prices; passenger fares become this spending money.
+# ELI5: food at forts now costs more, so cash stretches less far.
+# This keeps fort stops useful without letting one early stop overfill stores.
+FORT_FOOD_PRICE_PER_LB = 0.50
+# ELI5: wagon parts are also pricier to preserve repair-action relevance.
+FORT_PARTS_PRICE_PER_POINT = 1.90
+
+
 def _adjust_relationship(agent: "Agent", other_name: str, delta: float) -> None:
     """Clamp-safe adjustment of agent's trust toward another agent by name."""
     current = agent.relationships.get(other_name, 0.5)
@@ -201,12 +209,15 @@ class DecisionEngine:
         self, living: List["Agent"], world: "WagonTrain", n: int
     ) -> List[str]:
         msgs: List[str] = []
+        from .agent import Role
         if world.river_ahead:
             msgs.append(
                 "The group attempts to travel but a river blocks the path — "
                 "they must ford or wait."
             )
             return msgs
+
+        self._buy_supplies_at_fort_if_possible(world, msgs)
 
         modifier = world.travel_modifier
         # Wagon-parts factor:
@@ -217,7 +228,10 @@ class DecisionEngine:
         # Draft-animal power directly affects mobility.
         # ELI5: fewer pull animals means the same wagon moves slower.
         animal_factor = world.draft_power_multiplier
-        miles = TRAVEL_BASE_MILES * modifier * parts_factor * animal_factor
+        # ELI5: slightly stronger captain pace bonus helps late-game consistency,
+        # especially on seeds that previously stalled just short of Oregon.
+        captain_bonus = 1.0 + (0.06 * sum(1 for a in living if a.role == Role.CAPTAIN))
+        miles = TRAVEL_BASE_MILES * modifier * parts_factor * animal_factor * captain_bonus
         miles *= random.uniform(0.8, 1.2)  # ±20% random variation
         world.miles_traveled += miles
         # Track speed for derived metric (rolling 7-day window)
@@ -236,9 +250,11 @@ class DecisionEngine:
         # - Mechanics perform rolling maintenance while moving.
         # These are intentionally modest so travel remains meaningful without
         # replacing dedicated hunt/repair actions.
-        from .agent import Role
         hunters = [a for a in living if a.role == Role.HUNTER]
-        mechanics = [a for a in living if a.role == Role.MECHANIC]
+        wheelwrights = [a for a in living if a.role == Role.WHEELWRIGHT]
+        blacksmiths = [a for a in living if a.role == Role.BLACKSMITH]
+        hostlers = [a for a in living if a.role == Role.HOSTLER]
+        cooks = [a for a in living if a.role == Role.COOK]
 
         # Each hunter contributes about one person's daily food need.
         # FOOD_PER_PERSON_PER_DAY is already the simulation's daily baseline.
@@ -249,14 +265,33 @@ class DecisionEngine:
                 f"Hunters gather trail food while moving: +{trail_food:.1f} lbs."
             )
 
-        # Each mechanic recovers 2 wagon-parts points while moving.
-        travel_repairs = len(mechanics) * 2.0
+        # Everyone can forage a little while traveling; cooks improve usable yield.
+        # ELI5: everyone still forages, just a little less than before so hunting
+        # remains the primary way to refill food quickly.
+        general_forage = n * 0.32
+        # ELI5: cooks still help convert trail finds into meals, but the bonus is
+        # reduced to avoid runaway food growth in long stable runs.
+        cook_bonus = len(cooks) * 0.7
+        if general_forage + cook_bonus > 0.0:
+            world.food_supply += general_forage + cook_bonus
+            msgs.append(
+                "General trail foraging adds "
+                f"+{general_forage + cook_bonus:.1f} lbs of food."
+            )
+
+        # Wheelwrights and blacksmiths both contribute to repairs.
+        travel_repairs = len(wheelwrights) * 2.0 + len(blacksmiths) * 1.5
         if travel_repairs > 0.0:
             world.wagon_parts = min(100.0, world.wagon_parts + travel_repairs)
             msgs.append(
-                "Mechanics handle rolling maintenance during travel: "
+                "Wheelwrights and blacksmiths handle rolling maintenance: "
                 f"+{travel_repairs:.0f} parts."
             )
+
+        if hostlers:
+            world.morale = min(100.0, world.morale + len(hostlers) * 0.8)
+            msgs.append("Hostlers steady the draft team, reducing stress on the trail.")
+
         return msgs
 
     def _do_rest(
@@ -269,12 +304,16 @@ class DecisionEngine:
         # ELI5: medics make every rest day a little more effective at recovery.
         from .agent import Role
         medics = [a for a in living if a.role == Role.MEDIC]
+        cooks = [a for a in living if a.role == Role.COOK]
         medic_heal_bonus = min(4.0, len(medics) * 1.0)
+        # ELI5: cooks improve rest recovery, but we cap this lower so medics stay
+        # the main healing specialists and rest remains a meaningful choice.
+        cook_recovery_bonus = min(1.6, len(cooks) * 0.7)
 
         for agent in living:
             agent.health = min(
                 100.0,
-                agent.health + random.uniform(3.0, 8.0) + medic_heal_bonus,
+                agent.health + random.uniform(3.0, 8.0) + medic_heal_bonus + cook_recovery_bonus,
             )
             agent.morale = min(100.0, agent.morale + random.uniform(2.0, 5.0))
         world.morale = min(100.0, world.morale + 3.0)
@@ -285,18 +324,10 @@ class DecisionEngine:
                 f"+{medic_heal_bonus:.1f} bonus healing per traveler."
             )
 
-        # Preacher Sunday-rest morale boost:
-        # ELI5: when a preacher is present and the group truly rests on Sunday,
-        # morale gets an extra lift from shared ritual/community support.
-        preachers = [a for a in living if a.role == Role.PREACHER]
-        if world.is_sunday and preachers:
-            sunday_morale_bonus = min(6.0, 2.0 + len(preachers) * 1.0)
-            world.morale = min(100.0, world.morale + sunday_morale_bonus)
-            for agent in living:
-                agent.morale = min(100.0, agent.morale + 2.0)
+        if cook_recovery_bonus > 0.0:
             msgs.append(
-                "Sunday rest with preacher support lifts spirits: "
-                f"+{sunday_morale_bonus:.1f} group morale."
+                "Cooks stretch warm meals and broths during camp rest: "
+                f"+{cook_recovery_bonus:.1f} extra healing per traveler."
             )
         return msgs
 
@@ -392,8 +423,9 @@ class DecisionEngine:
     ) -> List[str]:
         msgs: List[str] = []
         from .agent import Role
-        mechanics = [a for a in living if a.role == Role.MECHANIC]
-        bonus = len(mechanics) * 5.0
+        wheelwrights = [a for a in living if a.role == Role.WHEELWRIGHT]
+        blacksmiths = [a for a in living if a.role == Role.BLACKSMITH]
+        bonus = len(wheelwrights) * 5.0 + len(blacksmiths) * 3.0
         restored = REPAIR_PARTS_RESTORE + bonus
         world.wagon_parts = min(100.0, world.wagon_parts + restored)
         # Once repair action is completed, clear any urgent person-specific repair duty.
@@ -565,6 +597,30 @@ class DecisionEngine:
         world.river_crossed()
         return msgs
 
+
+    def _buy_supplies_at_fort_if_possible(self, world: "WagonTrain", msgs: List[str]) -> None:
+        """Automatically buy essential supplies at fort stops using party cash."""
+        if not world.at_fort_stop or world.cash <= 0.0:
+            return
+
+        max_food_to_buy = max(0.0, 700.0 - world.food_supply)
+        affordable_food = world.cash / FORT_FOOD_PRICE_PER_LB
+        food_to_buy = min(max_food_to_buy, affordable_food)
+        if food_to_buy > 0.0:
+            cost = food_to_buy * FORT_FOOD_PRICE_PER_LB
+            world.food_supply += food_to_buy
+            world.cash = max(0.0, world.cash - cost)
+            msgs.append(f"Fort trade: bought {food_to_buy:.1f} lbs food for ${cost:.1f}.")
+
+        max_parts_to_buy = max(0.0, 100.0 - world.wagon_parts)
+        affordable_parts = world.cash / FORT_PARTS_PRICE_PER_POINT
+        parts_to_buy = min(max_parts_to_buy, affordable_parts)
+        if parts_to_buy > 0.0:
+            cost = parts_to_buy * FORT_PARTS_PRICE_PER_POINT
+            world.wagon_parts += parts_to_buy
+            world.cash = max(0.0, world.cash - cost)
+            msgs.append(f"Fort trade: bought {parts_to_buy:.1f} wagon parts for ${cost:.1f}.")
+
     # ------------------------------------------------------------------
     # Food consumption
     # ------------------------------------------------------------------
@@ -678,6 +734,16 @@ class DecisionEngine:
             + weather_penalty
         )
         world.morale = max(0.0, min(100.0, world.morale))
+
+        # Captains improve cohesion and help morale recover from pressure.
+        from .agent import Role
+        captains = [a for a in living if a.role == Role.CAPTAIN]
+        if captains:
+            world.morale = min(100.0, world.morale + len(captains) * 1.2)
+            for agent in living:
+                for captain in captains:
+                    if agent is not captain:
+                        _adjust_relationship(agent, captain.name, +0.01)
 
         # Sync individual morale toward group morale slightly
         for agent in living:

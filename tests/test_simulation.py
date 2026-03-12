@@ -15,7 +15,7 @@ from wagon_train.world import LANDMARKS, TRAIL_DESTINATION, TRAIL_STOPS, WagonTr
 from wagon_train.decisions import Action, DecisionEngine, HUNT_FOOD_FAIL_MIN
 from wagon_train.events import EventSystem
 from wagon_train.logger import SimulationLogger
-from wagon_train.simulation import Simulation, build_default_party
+from wagon_train.simulation import PASSENGER_FARE_DOLLARS, Simulation, build_default_party
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ class TestAgent:
         assert a.morale == 100.0
 
     def test_effective_influence_scales_with_health(self):
-        a = Agent("Test", Role.LEADER, Traits())
+        a = Agent("Test", Role.CAPTAIN, Traits())
         full_influence = a.effective_influence
         a.health = 50.0
         reduced_influence = a.effective_influence
@@ -101,7 +101,7 @@ class TestAgent:
 
     def test_propose_action_returns_action(self):
         world = WagonTrain()
-        a = Agent("Test", Role.LEADER, Traits(0.5, 0.5, 0.5, 0.5))
+        a = Agent("Test", Role.CAPTAIN, Traits(0.5, 0.5, 0.5, 0.5))
         action = a.propose_action(world)
         assert isinstance(action, Action)
 
@@ -123,10 +123,10 @@ class TestAgent:
         action = a.propose_action(world)
         assert action != Action.HUNT
 
-    def test_mechanic_proposes_repair_when_parts_low(self):
+    def test_wheelwright_proposes_repair_when_parts_low(self):
         world = WagonTrain()
         world.wagon_parts = 10.0
-        a = Agent("Mech", Role.MECHANIC, Traits(0.5, 0.5, 0.5, 0.5))
+        a = Agent("Wheel", Role.WHEELWRIGHT, Traits(0.5, 0.5, 0.5, 0.5))
         action = a.propose_action(world)
         assert action == Action.REPAIR_WAGON
 
@@ -136,7 +136,7 @@ class TestAgent:
         assert len(a.relationships) == 0  # empty until initialised by Simulation
 
     def test_relationship_modifier_neutral(self):
-        a = Agent("Alice", Role.LEADER, Traits())
+        a = Agent("Alice", Role.CAPTAIN, Traits())
         b = Agent("Bob", Role.HUNTER, Traits())
         c = Agent("Carol", Role.MEDIC, Traits())
         # Bob and Carol both have neutral (0.5) trust toward Alice
@@ -146,21 +146,21 @@ class TestAgent:
         assert abs(modifier - 1.0) < 1e-6  # neutral trust → 1.0 modifier
 
     def test_relationship_modifier_high_trust(self):
-        a = Agent("Alice", Role.LEADER, Traits())
+        a = Agent("Alice", Role.CAPTAIN, Traits())
         b = Agent("Bob", Role.HUNTER, Traits())
         b.relationships["Alice"] = 1.0  # full trust
         modifier = a.get_relationship_modifier([a, b])
         assert modifier == 1.5  # max modifier
 
     def test_relationship_modifier_low_trust(self):
-        a = Agent("Alice", Role.LEADER, Traits())
+        a = Agent("Alice", Role.CAPTAIN, Traits())
         b = Agent("Bob", Role.HUNTER, Traits())
         b.relationships["Alice"] = 0.0  # full distrust
         modifier = a.get_relationship_modifier([a, b])
         assert modifier == 0.5  # min modifier
 
     def test_update_relationship_clamps(self):
-        a = Agent("Alice", Role.LEADER, Traits())
+        a = Agent("Alice", Role.CAPTAIN, Traits())
         a.update_relationship("Bob", 0.3)
         assert a.relationships["Bob"] == pytest.approx(0.8)
         a.update_relationship("Bob", 0.5)
@@ -219,13 +219,13 @@ class TestAgent:
         world.urgent_repair_assignee = "Fixer"
         assert a.propose_action(world) == Action.REPAIR_WAGON
 
-    def test_preacher_prefers_rest_on_sunday_when_stable(self):
+    def test_cook_role_can_be_instantiated(self):
         world = WagonTrain(start_year=1843)
         world.advance_day()
         while not world.is_sunday:
             world.advance_day()
-        preacher = Agent("Rev", Role.PREACHER, Traits(0.5, 0.5, 0.5, 0.5), health=95.0, morale=80.0)
-        assert preacher.propose_action(world) == Action.REST
+        cook = Agent("Rev", Role.COOK, Traits(0.5, 0.5, 0.5, 0.5), health=95.0, morale=80.0)
+        assert cook.role == Role.COOK
 
 
 # ---------------------------------------------------------------------------
@@ -493,8 +493,8 @@ class TestDecisionEngine:
         avg_health = sum(a.health for a in party) / len(party)
         assert avg_health > 50.0
 
-    def test_travel_passive_hunter_food_and_mechanic_repairs_apply(self, monkeypatch):
-        # ELI5: on travel days hunters should gather a little food and mechanics
+    def test_travel_passive_hunter_food_and_wheelwright_repairs_apply(self, monkeypatch):
+        # ELI5: on travel days hunters should gather a little food and wheelwrights
         # should recover a little wagon condition without spending a full action.
         engine = DecisionEngine()
         world = WagonTrain()
@@ -505,7 +505,7 @@ class TestDecisionEngine:
         party = [
             Agent("Hunter1", Role.HUNTER, Traits()),
             Agent("Hunter2", Role.HUNTER, Traits()),
-            Agent("Mech", Role.MECHANIC, Traits()),
+            Agent("Wheel", Role.WHEELWRIGHT, Traits()),
         ]
 
         # Keep travel-distance randomness deterministic.
@@ -514,9 +514,10 @@ class TestDecisionEngine:
 
         assert any("trail food" in msg for msg in outcomes)
         assert any("rolling maintenance" in msg for msg in outcomes)
-        # Net food rises by +3.0 trail food then is reduced by travel consumption 4.5.
-        assert world.food_supply == pytest.approx(98.5, abs=0.01)
-        # +2 maintenance from one mechanic.
+        # Net food rises by +3.0 hunter food and +0.96 general foraging, then
+        # is reduced by travel consumption 4.5.
+        assert world.food_supply == pytest.approx(99.46, abs=0.01)
+        # +2 maintenance from one wheelwright.
         assert world.wagon_parts >= 52.0
 
     def test_rest_with_medic_increases_healing_rate(self, monkeypatch):
@@ -542,25 +543,44 @@ class TestDecisionEngine:
 
         assert healed_with_medic > healed_without_medic
 
-    def test_preacher_adds_morale_on_successful_sunday_rest(self, monkeypatch):
-        # ELI5: when Sunday rest is chosen and a preacher is present, morale gets
-        # a visible extra bump.
+    def test_cook_adds_extra_rest_recovery(self, monkeypatch):
+        # ELI5: cooks should make rest actions a little better at recovery.
         engine = DecisionEngine()
-        world = WagonTrain(start_year=1848)
-        world.advance_day()
-        while not world.is_sunday:
-            world.advance_day()
-        world.morale = 60.0
-        party = [
-            Agent("Preacher", Role.PREACHER, Traits(), morale=50.0),
-            Agent("Traveler", Role.PASSENGER, Traits(), morale=50.0),
+        world = WagonTrain()
+        with_cook = [
+            Agent("Cook", Role.COOK, Traits(), health=50.0),
+            Agent("Traveler", Role.PASSENGER, Traits(), health=50.0),
+        ]
+        without_cook = [
+            Agent("Traveler1", Role.PASSENGER, Traits(), health=50.0),
+            Agent("Traveler2", Role.PASSENGER, Traits(), health=50.0),
         ]
 
         monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
-        outcomes = engine.apply_action(Action.REST, party, world)
+        engine.apply_action(Action.REST, with_cook, world)
+        healed_with_cook = sum(a.health for a in with_cook) / len(with_cook)
 
-        assert any("Sunday rest with preacher support" in msg for msg in outcomes)
-        assert world.morale > 63.0
+        world2 = WagonTrain()
+        engine.apply_action(Action.REST, without_cook, world2)
+        healed_without_cook = sum(a.health for a in without_cook) / len(without_cook)
+
+        assert healed_with_cook > healed_without_cook
+
+    def test_travel_buys_supplies_at_fort_when_cash_available(self, monkeypatch):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.miles_traveled = 320.0  # Fort Kearny
+        world.cash = 40.0
+        world.food_supply = 620.0
+        world.wagon_parts = 90.0
+        party = [Agent("Traveler", Role.PASSENGER, Traits())]
+
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.TRAVEL, party, world)
+
+        assert any("Fort trade" in msg for msg in outcomes)
+        assert world.cash < 40.0
+        assert world.food_supply > 620.0
 
     def test_collect_votes_uses_contextual_influence_boosts(self):
         # ELI5: medic should cast a bigger vote when sickness is active.
@@ -645,7 +665,7 @@ class TestDecisionEngine:
         engine = DecisionEngine()
         world = WagonTrain()
         world.wagon_parts = 20.0
-        party = [Agent("Mech", Role.MECHANIC, Traits())]
+        party = [Agent("Wheel", Role.WHEELWRIGHT, Traits())]
         engine.apply_action(Action.REPAIR_WAGON, party, world)
         assert world.wagon_parts > 20.0
 
@@ -694,8 +714,8 @@ class TestDecisionEngine:
     def test_repair_clears_urgent_repair_assignment(self):
         engine = DecisionEngine()
         world = WagonTrain()
-        world.urgent_repair_assignee = "Mech"
-        party = [Agent("Mech", Role.MECHANIC, Traits())]
+        world.urgent_repair_assignee = "Wheel"
+        party = [Agent("Wheel", Role.WHEELWRIGHT, Traits())]
         engine.apply_action(Action.REPAIR_WAGON, party, world)
         assert world.urgent_repair_assignee is None
 
@@ -754,25 +774,25 @@ class TestDecisionEngine:
         engine = DecisionEngine()
         world = WagonTrain()
         world.river_ahead = False
-        leader = Agent("Leader", Role.LEADER, Traits(0.5, 0.7, 0.6, 0.8))
+        captain = Agent("Leader", Role.CAPTAIN, Traits(0.5, 0.7, 0.6, 0.8))
         follower = Agent("Follower", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
-        # Follower highly trusts leader
+        # Follower highly trusts captain
         follower.relationships["Leader"] = 1.0
-        party = [leader, follower]
+        party = [captain, follower]
         tally_high = engine.collect_votes(party, world)
 
-        leader2 = Agent("Leader", Role.LEADER, Traits(0.5, 0.7, 0.6, 0.8))
+        captain2 = Agent("Leader", Role.CAPTAIN, Traits(0.5, 0.7, 0.6, 0.8))
         follower2 = Agent("Follower", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
-        # Follower distrusts leader2
+        # Follower distrusts captain2
         follower2.relationships["Leader"] = 0.0
-        party2 = [leader2, follower2]
+        party2 = [captain2, follower2]
         tally_low = engine.collect_votes(party2, world)
 
         # Leader should have higher weighted vote when trusted
-        leader_action_high = leader.propose_action(world)
-        leader_action_low = leader2.propose_action(world)
-        if leader_action_high == leader_action_low:
-            assert tally_high.get(leader_action_high, 0) > tally_low.get(leader_action_low, 0)
+        captain_action_high = captain.propose_action(world)
+        captain_action_low = captain2.propose_action(world)
+        if captain_action_high == captain_action_low:
+            assert tally_high.get(captain_action_high, 0) > tally_low.get(captain_action_low, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +821,7 @@ class TestEventSystem:
         es = EventSystem()
         world = WagonTrain()
         world.miles_traveled = 100.0
-        party = [Agent("A", Role.MECHANIC, Traits())]
+        party = [Agent("A", Role.WHEELWRIGHT, Traits())]
 
         synthetic = {
             "name": "Synthetic Stall",
@@ -822,7 +842,7 @@ class TestEventSystem:
         es = EventSystem()
         world = WagonTrain()
         party = [
-            Agent("Mechanic", Role.MECHANIC, Traits()),
+            Agent("Wheelwright", Role.WHEELWRIGHT, Traits()),
             Agent("Passenger", Role.PASSENGER, Traits()),
         ]
         synthetic = {
@@ -838,7 +858,7 @@ class TestEventSystem:
         es._choose_event = lambda: synthetic  # type: ignore[method-assign]
         es.BASE_EVENT_CHANCE = 1.0
         es.roll(world, party)
-        assert world.urgent_repair_assignee == "Mechanic"
+        assert world.urgent_repair_assignee == "Wheelwright"
 
     def test_injured_animal_event_reduces_draft_animal_count(self):
         es = EventSystem()
@@ -890,13 +910,23 @@ class TestSimulation:
         party = build_default_party()
         assert len(party) == 20
         roles = {a.role for a in party}
-        assert Role.LEADER in roles
+        assert Role.CAPTAIN in roles
         assert Role.HUNTER in roles
         assert Role.MEDIC in roles
-        assert Role.MECHANIC in roles
+        assert Role.WHEELWRIGHT in roles
         assert Role.SCOUT in roles
         assert Role.PASSENGER in roles
-        assert Role.PREACHER in roles
+        assert Role.COOK in roles
+        assert Role.BLACKSMITH in roles
+        assert Role.GUARD in roles
+        assert Role.HOSTLER in roles
+
+
+    def test_simulation_collects_passenger_fares(self):
+        sim = Simulation(seed=1, log_to_stdout=False)
+        passenger_count = sum(1 for a in sim.agents if a.role == Role.PASSENGER)
+        expected_cash = passenger_count * PASSENGER_FARE_DOLLARS
+        assert sim.world.cash == pytest.approx(expected_cash)
 
     def test_simulation_initializes_relationships(self):
         sim = Simulation(seed=1, log_to_stdout=False)
