@@ -71,6 +71,8 @@ class Simulation:
 
             # 1. Advance day (weather, spoilage, wear)
             self.world.advance_day()
+            # Capture where the day starts so we can measure net daily progress.
+            day_start_miles = self.world.miles_traveled
 
             # 2. Log day header
             self.logger.log_day_header(self.world)
@@ -94,7 +96,11 @@ class Simulation:
             outcomes = self.engine.apply_action(winning_action, self.agents, self.world)
             self.logger.log_outcomes(outcomes)
 
-            # 7. Agent status
+            # 8. Record non-negative net progress for the entire day
+            # (events + chosen action combined).
+            self.world.record_daily_progress(self.world.miles_traveled - day_start_miles)
+
+            # 9. Agent status
             self.logger.log_agent_status(self.agents)
 
         # Determine end reason

@@ -1,114 +1,128 @@
-# Chances, Formulas, and Outcome Review
+# Chances, Formulas, and Outcome Review (Current Build)
 
-This review focuses on the current probabilities/formulas in the simulation and their impact on outcomes.
+This review re-checks the **current** simulation formulas and probabilities using fresh Monte Carlo runs, then suggests targeted tuning changes.
 
-## Quick health check
+## Outcome snapshot (what happens right now)
 
-I ran a 300-seed Monte Carlo sweep of the full simulation loop (`Simulation(seed=i).run()` for `i=0..299`).
+I ran two sweeps:
+
+1. **500 full runs** (`Simulation(seed=i).run()` for `i=0..499`) to measure win/survival outcomes.
+2. **300 instrumented runs** (manual daily loop) to measure event frequency and action mix.
 
 Observed outcomes:
-- Win rate (reach 2000 miles): **0%**
-- Average miles at end: **~516**
-- Average end day: **~190**
-- End reasons: mostly 200-day timeout, with some full-party deaths
 
-## Current formulas and what they imply
+- Win rate: **22.4%** (112 / 500)
+- Average end miles: **1515.9**
+- Median end miles: **1484.0**
+- Average run length: **165.5 days**
+- Average survivors on wins: **6.78**
+- End states (300-run instrumented sweep):
+  - **Win: 80**
+  - **Timeout: 150**
+  - **All dead: 70**
 
-## 1) Progress pacing is far too slow
+Interpretation: the game is now *winnable* (good), but still leans punishing, with many runs timing out or collapsing late.
 
-### Current travel formula
-- Base miles/day: `20`
-- Weather multiplier: as low as `0.4` (stormy), `0.5` (snowy)
-- Wagon parts multiplier: `min(1.0, wagon_parts/50.0)`
-- Random factor: `0.8–1.2`
+---
 
-Even in decent conditions, expected daily travel hovers too low once weather + parts degradation + non-travel actions are included.
+## Formula and chance review
 
-**Why this hurts outcomes:** reaching 2000 miles in 200 days requires ~10 miles/day average *across all days*. The current decision policy spends many days on rest/hunt/repair/river delays, so travel days must be much higher than 10 miles/day to compensate.
+## 1) Event pressure is calibrated reasonably, but severe health shocks still snowball
 
-### Suggested improvement
-- Raise `TRAVEL_BASE_MILES` from `20` to **`28–32`**.
-- Make parts penalty less punishing by replacing `wagon_parts/50` with **`0.5 + wagon_parts/100`** (range 0.5..1.5, then clamp to 1.2 or 1.3 max if needed).
-- Reduce daily forced drag slightly:
-  - spoilage from `0.3–1.0` to **`0.2–0.7`**
-  - wear from `0.0–1.0` to **`0.0–0.7`**
+### Current formulas
+- Daily event chance: `BASE_EVENT_CHANCE = 0.22`
+- Weighted selection by severity, with anti-streak suppression for back-to-back severe negatives.
 
-## 2) Event system is frequent and swingy
+### Measured outcome
+- Realized event-day rate over 300 runs: **21.9%** (very close to target).
 
-### Current event logic
-- Daily event chance: `0.35`
-- Uniform random from 15 events, including multiple high-penalty health events and large morale swings.
+### Improvement suggestions
+- Keep event rate at `0.22`.
+- Soften *group-wide* health hits on severe disease events (e.g., reduce `-20` to `-12..-16` on cholera/dysentery style events).
+- Keep single-target danger events (snake bite) for drama, but reduce frequency of events that damage **everyone at once**.
 
-**Why this hurts outcomes:** event frequency is high enough that stacking penalties (health + morale + parts + food) often outpaces recovery options.
+Why: wipe-style health attrition is a major driver of all-dead endings.
 
-### Suggested improvement
-- Lower `BASE_EVENT_CHANCE` from `0.35` to **`0.22–0.28`**.
-- Split catalogue into weighted categories and tune weights instead of uniform choice:
-  - neutral/flavor events: high weight
-  - mild negative: medium
-  - severe negative: low
-  - positive: medium
-- Add anti-streak protection (e.g., severe negative cannot occur 2 days in a row).
+## 2) River crossing risk is still too costly for how often it appears
 
-## 3) Hunting has very high success with 2 hunters
+### Current formulas
+- Ford risk: `max(0.1, 0.6 - 0.1 * scouts)`.
+- Default party has 1 scout ⇒ failure risk near **0.5**.
+- Failed ford applies random per-agent health loss + food loss + morale hit.
 
-### Current hunt formula
-- `success = min(0.95, 0.4 + 0.3 * num_hunters)`
-- With 2 hunters in default party, success = **1.0 capped to 0.95**
-- Reward on success: `30–70` food
+### Measured outcome
+- Observed ford failure rate: **50.8%** (1692 attempts).
 
-**Why this is awkward:** survival still fails despite strong hunting, which indicates travel pacing + penalty pressure are dominant bottlenecks. Hunt can become a repetitive “resource reset” action without advancing journey goals.
+### Improvement suggestions
+- Shift risk curve down slightly (example: `0.5 - 0.1 * scouts`, floor `0.08`).
+- Narrow failure health loss band (example: `3..10` instead of `4..15`).
+- Add a small positive reward for safe crossing beyond morale (already includes parts +2, which is good).
 
-### Suggested improvement
-- Keep hunt useful but less binary:
-  - success formula: **`0.3 + 0.2 * hunters`**, cap `0.85–0.9`
-  - on failure, small consolation gain (e.g., `5–12` food)
-- Optional: tie hunt yield to weather/terrain so bad weather reduces reliability.
+Why: river outcomes currently feel close to coin flips with very asymmetric downside.
 
-## 4) River crossing risk may create dead time
+## 3) Action selection over-indexes on maintenance actions
 
-### Current ford formula
-- Risk: `max(0.1, 0.6 - 0.1 * scouts)`
-- On failure: random health loss to everyone + food loss + morale hit
-- Crossing always gives only `5` miles and consumes the day
+### Measured action mix (300-run instrumented sweep)
+- Hunt: **15,931**
+- Travel: **15,728**
+- Rest: **15,435**
+- Ford: **1,692**
+- Ration: **447**
+- Repair: **272**
 
-**Why this hurts outcomes:** crossing day contributes little progress and can inflict large setbacks.
+### Interpretation
+The top 3 actions are almost evenly split. That means progress actions are not dominating enough to consistently hit 2000 miles by day 200, which explains the high timeout count.
 
-### Suggested improvement
-- Keep tension but reduce stall effect:
-  - increase `FORD_MILES` from `5` to **`8–12`**
-  - cap group health loss severity (smaller upper bound)
-  - add positive payoff for safe crossing (small parts/morale boost)
+### Improvement suggestions
+- Increase schedule-pressure bias slightly in decision scoring when behind pace.
+- Introduce a mild “consecutive non-travel day” penalty to action scores (except during critical survival states).
+- Consider small passive recovery on travel days for high-morale parties, so travel does not always feel strictly worse than rest/hunt loops.
 
-## 5) Decision policy is reactive but not strategic
+## 4) Travel pacing is close, but still vulnerable to drift
 
-The party mostly reacts to immediate low resources and doesn’t optimize for route progress over time.
+### Current formulas
+- `TRAVEL_BASE_MILES = 32`
+- Weather and wagon-parts multipliers can push daily progress down heavily in bad conditions.
 
-### Suggested improvement
-- Add a lightweight heuristic score per action each day:
-  - `progress value + survival value + risk penalty`
-- Include a “must-travel target” rule:
-  - if projected miles/day needed to finish exceeds threshold, bias toward travel unless critical needs are red.
+### Improvement suggestions
+- Keep base travel at 32 for now.
+- Add a tiny guaranteed floor on travel-day miles (example: minimum 8–10 miles unless blocked by river).
+- Optionally reduce extreme weather drag (`stormy` from `0.4` to `0.45`) if timeout rate remains high after decision-tuning.
 
-## Recommended tuning sequence (small safe steps)
+Why: many near-miss runs likely fail because cumulative bad-weather sequences erase progress pace.
 
-1. **Pacing first**
-   - Increase travel base + slightly soften wear/spoilage.
-2. **Event pressure second**
-   - Lower event frequency and weight severe negatives down.
-3. **River and hunt cleanup**
-   - Raise ford day progress; smooth hunt success/yields.
-4. **Policy upgrade**
-   - Add simple projected-finish heuristic.
+---
 
-This sequence should improve completion odds without removing survival pressure.
+## Recommended tuning order (small, safe iterations)
 
-## Suggested target metrics after tuning
+1. **River risk softening** (highest pain for least design disruption).
+2. **Decision-policy nudge toward progress** when behind schedule.
+3. **Severe group-health event softening** to reduce full-party wipeouts.
+4. Re-run 500-seed sweep and compare against targets.
 
-For 300-seed sweeps with default party:
-- Win rate target: **25–45%**
-- Average survivors on win: **4–8**
-- Timeout rate: **<40%**
-- Full-party death rate: **<20%**
+## Updated target metrics
 
-Those targets keep challenge while making success realistically attainable.
+After the next tuning pass, aim for:
+
+- Win rate: **30–40%**
+- Timeout rate: **<45%**
+- All-dead rate: **<15–18%**
+- Survivors on wins: **5–8 average**
+
+These targets should preserve challenge while reducing “unrecoverable spiral” runs.
+
+---
+
+## Implemented improvements in this pass
+
+- Added a startup prompt for party size when running `main.py` (with a `--party-size` override for non-interactive use).
+- Wagon-break events now assign an urgent repair owner (prefers mechanic), so repair pressure is explicitly represented in decisions.
+- Added day-by-day low-progress streak tracking and fed that into agent decision scoring so travel/ford urgency grows when the group stalls.
+- Removed backward movement behavior from negative mileage events (no event can subtract miles traveled anymore).
+- Increased morale sensitivity to stalling, hunger, poor health, poor wagon condition, and adverse weather.
+
+## Next suggestions after this implementation
+
+- Re-run 500-seed and 1000-seed sweeps to quantify the effect of stronger morale pressure on death vs timeout outcomes.
+- If death rate rises too much, soften only health-linked morale penalty before touching travel pace.
+- Consider one role-aware mitigation: medic can reduce morale loss from sickness-related event days.

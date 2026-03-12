@@ -133,6 +133,11 @@ class Agent:
         if not self.alive:
             return Action.REST
 
+        # If this traveler has been explicitly assigned an urgent wagon repair,
+        # they should immediately advocate for repair until the team handles it.
+        if world.urgent_repair_assignee == self.name:
+            return Action.REPAIR_WAGON
+
         # Role-specific tendencies
         if self.role == Role.HUNTER and world.food_supply < 30:
             return Action.HUNT
@@ -218,13 +223,16 @@ class Agent:
         from .decisions import Action
 
         progress_urgency = world.miles_needed_per_remaining_day
+        # Each low-progress day should make movement actions more appealing.
+        # This gives us a smooth, accumulating "we're stalling" pressure.
+        stall_pressure = min(8.0, world.low_progress_streak * 1.2)
         score_map = {
-            Action.TRAVEL: 5.0 + min(8.0, progress_urgency * 0.8),
+            Action.TRAVEL: 5.0 + min(8.0, progress_urgency * 0.8) + stall_pressure,
             Action.REST: 2.0 + (4.0 if self._health < 50 else 0.0),
             Action.HUNT: 2.5 + (4.5 if world.food_supply < 25 else 0.0),
             Action.REPAIR_WAGON: 2.5 + (4.0 if world.wagon_parts < 30 else 0.0),
             Action.RATION_FOOD: 1.5 + (3.5 if world.food_supply < 20 else 0.0),
-            Action.FORD_RIVER: 4.0 + (2.0 if world.river_ahead else -3.0),
+            Action.FORD_RIVER: 4.0 + (2.0 if world.river_ahead else -3.0) + stall_pressure,
         }
         return score_map[action]
 
@@ -241,7 +249,10 @@ class Agent:
 
         # If a river is ahead, "progress bias" means preferring to ford,
         # because travel itself cannot proceed until the crossing is resolved.
-        must_travel_threshold = world.REQUIRED_MILES_PER_DAY * 1.2
+        # If we have stalled for several days, reduce the threshold so progress
+        # bias kicks in earlier and the party breaks out of passive loops.
+        adaptive_pressure = min(0.35, world.low_progress_streak * 0.03)
+        must_travel_threshold = world.REQUIRED_MILES_PER_DAY * (1.2 - adaptive_pressure)
         behind_schedule = world.miles_needed_per_remaining_day >= must_travel_threshold
         if not behind_schedule:
             return base_action

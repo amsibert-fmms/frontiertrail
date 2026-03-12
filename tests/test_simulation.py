@@ -117,6 +117,12 @@ class TestAgent:
         action = a.propose_action(world)
         assert action == Action.TRAVEL
 
+    def test_urgent_repair_assignee_forces_repair_vote(self):
+        world = WagonTrain()
+        a = Agent("Fixer", Role.PASSENGER, Traits(0.5, 0.5, 0.5, 0.5))
+        world.urgent_repair_assignee = "Fixer"
+        assert a.propose_action(world) == Action.REPAIR_WAGON
+
 
 # ---------------------------------------------------------------------------
 # World / WagonTrain tests
@@ -183,6 +189,14 @@ class TestWagonTrain:
         world.day = 100
         world.miles_traveled = 900
         assert world.miles_needed_per_remaining_day > 0
+
+    def test_record_daily_progress_clamps_negative_and_tracks_streak(self):
+        world = WagonTrain()
+        world.record_daily_progress(-10.0)
+        assert world.last_daily_progress == 0.0
+        assert world.low_progress_streak == 1
+        world.record_daily_progress(12.0)
+        assert world.low_progress_streak == 0
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +292,14 @@ class TestDecisionEngine:
         # After ration, food supply should be higher (less consumed)
         assert world1.food_supply >= world2.food_supply
 
+    def test_repair_clears_urgent_repair_assignment(self):
+        engine = DecisionEngine()
+        world = WagonTrain()
+        world.urgent_repair_assignee = "Mech"
+        party = [Agent("Mech", Role.MECHANIC, Traits())]
+        engine.apply_action(Action.REPAIR_WAGON, party, world)
+        assert world.urgent_repair_assignee is None
+
     def test_ford_river_crosses_when_river_present(self):
         engine = DecisionEngine()
         world = WagonTrain()
@@ -311,6 +333,49 @@ class TestEventSystem:
             es.roll(world, party)
             # Just verify no crashes and values stay non-negative
             assert world.food_supply >= 0.0
+
+    def test_negative_miles_event_never_moves_backwards(self):
+        es = EventSystem()
+        world = WagonTrain()
+        world.miles_traveled = 100.0
+        party = [Agent("A", Role.MECHANIC, Traits())]
+
+        synthetic = {
+            "name": "Synthetic Stall",
+            "description": "Testing no-backwards-travel rule.",
+            "food_delta": 0,
+            "parts_delta": 0,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "miles_delta": -25,
+            "sickness": False,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+        es.roll(world, party)
+        assert world.miles_traveled == 100.0
+
+    def test_wagon_break_event_assigns_urgent_repair_owner(self):
+        es = EventSystem()
+        world = WagonTrain()
+        party = [
+            Agent("Mechanic", Role.MECHANIC, Traits()),
+            Agent("Passenger", Role.PASSENGER, Traits()),
+        ]
+        synthetic = {
+            "name": "Synthetic Wagon Break",
+            "description": "Testing urgent repair assignment.",
+            "food_delta": 0,
+            "parts_delta": -10,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "sickness": False,
+            "wagon_break": True,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+        es.roll(world, party)
+        assert world.urgent_repair_assignee == "Mechanic"
 
 
 # ---------------------------------------------------------------------------

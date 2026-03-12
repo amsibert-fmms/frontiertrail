@@ -84,6 +84,14 @@ class WagonTrain:
         self.weather: Weather = weather
         self.morale: float = 80.0          # group morale (0-100)
         self.sickness_events: List[str] = []
+        # Track who (if anyone) is urgently responsible for fixing wagon damage.
+        # This is set by severe breakage events and cleared after a repair action.
+        self.urgent_repair_assignee: str | None = None
+        # Keep lightweight day-to-day pacing memory so agents can react when
+        # progress has stalled for several days in a row.
+        self.low_progress_streak: int = 0
+        # Expose today's progress for logging/tuning; this is never negative.
+        self.last_daily_progress: float = 0.0
         self.river_ahead: bool = False
         self._days_until_river: int = random.randint(5, 15)
         self._event_log: List[str] = []    # events that happened today
@@ -138,6 +146,26 @@ class WagonTrain:
         """Reset river state after the party fords it."""
         self.river_ahead = False
         self._days_until_river = random.randint(8, 20)
+
+    def record_daily_progress(self, miles_gained_today: float) -> None:
+        """Record daily progress and update the low-progress streak.
+
+        ELI5 version:
+        - If we moved a solid amount today, reset the "stuck" counter.
+        - If we barely moved (or did not move), increase the stuck counter.
+        - We never treat progress as negative because the wagon cannot travel
+          backwards toward the start.
+        """
+        # Safety clamp: do not let any caller record negative travel progress.
+        self.last_daily_progress = max(0.0, miles_gained_today)
+
+        # "Low progress" threshold is intentionally small: if we are under this
+        # amount for multiple days, decision logic should prioritize moving.
+        low_progress_threshold = 5.0
+        if self.last_daily_progress < low_progress_threshold:
+            self.low_progress_streak += 1
+        else:
+            self.low_progress_streak = 0
 
     # ------------------------------------------------------------------
     # State summary

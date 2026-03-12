@@ -215,6 +215,8 @@ class DecisionEngine:
         bonus = len(mechanics) * 5.0
         restored = REPAIR_PARTS_RESTORE + bonus
         world.wagon_parts = min(100.0, world.wagon_parts + restored)
+        # Once repair action is completed, clear any urgent person-specific repair duty.
+        world.urgent_repair_assignee = None
         msgs.append(
             f"The wagon is repaired. Parts supply restored by {restored:.0f} points "
             f"(now {world.wagon_parts:.0f})."
@@ -313,6 +315,33 @@ class DecisionEngine:
         )
         # Drift group morale toward average individual morale
         world.morale += (avg_morale - world.morale) * 0.1
+
+        # Additional world-pressure penalties (stronger than before):
+        # - repeated low/no progress hurts confidence,
+        # - hunger and low health increase hopelessness,
+        # - broken equipment + bad weather reduce spirit.
+        weather_penalty_map = {
+            "sunny": 0.0,
+            "cloudy": 0.4,
+            "hot": 0.8,
+            "rainy": 1.6,
+            "snowy": 2.2,
+            "stormy": 3.0,
+        }
+        avg_hunger = sum(a.hunger for a in living) / len(living) if living else 0.0
+        progress_penalty = min(6.0, world.low_progress_streak * 0.8)
+        hunger_penalty = max(0.0, (avg_hunger - 40.0) * 0.05)
+        health_penalty = max(0.0, (55.0 - avg_health) * 0.07)
+        mechanical_penalty = max(0.0, (45.0 - world.wagon_parts) * 0.05)
+        weather_penalty = weather_penalty_map[world.weather.value]
+
+        world.morale -= (
+            progress_penalty
+            + hunger_penalty
+            + health_penalty
+            + mechanical_penalty
+            + weather_penalty
+        )
         world.morale = max(0.0, min(100.0, world.morale))
 
         # Sync individual morale toward group morale slightly
