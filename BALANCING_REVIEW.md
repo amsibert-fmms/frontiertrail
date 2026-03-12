@@ -259,6 +259,87 @@ Action mix snapshot:
 
 This change set improves **timeouts** but is still unsafe for overall outcomes: **win rate and survivability remain far below guardrails**. In plain terms, this is likely too punishing when combined with existing pressure systems.
 
+---
+
+## Party size sweep (10 to 50): success-rate and formula review
+
+To answer whether there is an optimal party-size band, I ran a dedicated sweep with party sizes from **10 through 50**.
+
+### Test method
+
+- For each party size, generated a deterministic synthetic roster by repeating the default role mix (`leader, hunter, medic, mechanic, scout, ...`) and sampling traits from a fixed seed.
+- Ran full simulations with logging disabled for speed.
+- Primary sweep: **40 runs per party size** for all sizes 10..50.
+- Follow-up refinement: **200 runs per size** for sizes 10..20.
+
+### What the data says
+
+High-level pattern from the 10..50 sweep:
+
+- Success declines sharply as size increases.
+- After about **size 20**, wins become rare.
+- Around **size 28+**, runs are effectively all-dead in almost all trials.
+
+Refined 200-run sample for sizes 10..20:
+
+| Party size | Win rate | Timeout | All-dead | Avg end miles |
+|---|---:|---:|---:|---:|
+| 10 | 7.0% | 51.5% | 41.5% | 1389.7 |
+| 11 | 9.0% | 29.0% | 62.0% | 1302.1 |
+| 12 | 6.5% | 48.5% | 45.0% | 1411.3 |
+| 13 | 8.5% | 42.5% | 49.0% | 1243.8 |
+| 14 | 12.5% | 36.0% | 51.5% | 1190.4 |
+| 15 | 5.5% | 22.5% | 72.0% | 967.2 |
+| 16 | 5.0% | 20.5% | 74.5% | 869.8 |
+| 17 | 6.5% | 14.0% | 79.5% | 813.6 |
+| 18 | 4.0% | 12.5% | 83.5% | 694.0 |
+| 19 | 3.0% | 6.0% | 91.0% | 626.4 |
+| 20 | 4.5% | 11.5% | 84.0% | 674.4 |
+
+Interpretation:
+
+- There is **no broad high-size optimum** under current formulas.
+- The most viable band is approximately **10 to 14**, with fragile/noisy local peaks.
+- Beyond that, party size mostly trades timeouts for early collapse.
+
+### Why this happens (formula diagnosis)
+
+The current economy is not party-size scalable:
+
+1. **Food consumption scales linearly with headcount**
+   - Daily food drain is `FOOD_PER_PERSON_PER_DAY * N`.
+2. **Food production from hunt does not scale with headcount**
+   - Hunt yield is a fixed range (`30..70`) and even failed hunts grant fixed forage.
+   - Hunter count raises success chance, but with a cap and diminishing returns.
+3. **Event/repair benefits are mostly flat deltas**
+   - Many positive and negative deltas are constants not normalized by party size.
+
+Net effect: larger parties run a structural per-capita deficit and become mathematically disadvantaged.
+
+### Suggested improvements
+
+If larger parties are meant to be playable, rebalance around per-capita scaling:
+
+1. **Scale hunt yield with party size (bounded)**
+   - Example: `food_gained *= (0.75 + 0.03 * N)` with cap (e.g., `<= 2.0x`).
+   - Keep hunter skill affecting success chance, not raw infinite scaling.
+
+2. **Scale forage floor by size lightly**
+   - Failed-hunt forage could include a small `+k * sqrt(N)` term so big parties are not guaranteed doomed after a few misses.
+
+3. **Normalize some event deltas per capita**
+   - Health penalties like `-15 to all` should consider `N` (or target a subset) so very large groups do not instantly spiral.
+
+4. **Add party-size-aware initial resources**
+   - Set starting food to something like `base + per_person * N` rather than a flat constant.
+
+5. **Decision policy: increase hunt priority when food-days-left is low**
+   - Use `food_supply / (N * FOOD_PER_PERSON_PER_DAY)` as a “days remaining” signal.
+
+### Answer to “is there an optimum range?”
+
+Yes: with current formulas, the practical optimum is a **small party band (about 10–14)**. Above roughly **15–20**, success drops off quickly and beyond that outcomes are predominantly all-dead.
+
 Pushback: keeping Sunday penalties at this strength without compensating safety valves is probably a bad idea if your primary objective is higher completion and lower mortality.
 
 ### Suggested improvements (next safe iteration)
@@ -272,4 +353,3 @@ Pushback: keeping Sunday penalties at this strength without compensating safety 
    - On Sundays with river ahead, allow preacher to support ford/travel if progress is critically behind schedule.
 4. **Pair with Pass 3C safety valves**
    - Morale pressure soft cap + survivability-gated non-travel pressure before judging Sunday mechanics as final.
-
