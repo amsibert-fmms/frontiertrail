@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wagon_train.agent import Agent, Role, Traits
-from wagon_train.world import WagonTrain, Weather
+from wagon_train.world import LANDMARKS, TRAIL_DESTINATION, TRAIL_STOPS, WagonTrain, Weather
 from wagon_train.decisions import Action, DecisionEngine
 from wagon_train.events import EventSystem
 from wagon_train.logger import SimulationLogger
@@ -156,8 +156,79 @@ class TestWagonTrain:
 
     def test_is_finished_on_miles(self):
         world = WagonTrain()
-        world.miles_traveled = 2000.0
+        world.miles_traveled = world.GOAL_MILES
         assert world.is_finished
+
+
+
+    def test_goal_miles_matches_ordered_trail_data(self):
+        world = WagonTrain()
+        # ELI5: finish line should exactly match the final cumulative-mile stop.
+        assert world.GOAL_MILES == 2040
+        assert world.GOAL_MILES == TRAIL_STOPS[-1]["distance"]
+
+    def test_next_landmark_tracks_progress(self):
+        world = WagonTrain()
+        # At the very start, the first stop ahead should be Kansas River Crossing.
+        assert world.next_landmark == "Kansas River Crossing"
+
+        # At exactly 102 miles, we should now be aiming for Big Blue River Crossing.
+        world.miles_traveled = 102.0
+        assert world.next_landmark == "Big Blue River Crossing"
+
+        # Near the end of the route, the next stop should be Barlow Road.
+        world.miles_traveled = 1901.0
+        assert world.next_landmark == "Barlow Road"
+
+        # Once at/after destination, keep returning destination node.
+        world.miles_traveled = world.GOAL_MILES
+        assert world.next_landmark == TRAIL_DESTINATION
+
+    def test_landmarks_contains_linear_hops_with_segment_miles(self):
+        # ELI5: each hop should match the cumulative distance differences.
+        assert ("Kansas River Crossing", 102) in LANDMARKS["Independence, Missouri"]["next"]
+        assert ("Fort Kearny", 135) in LANDMARKS["Big Blue River Crossing"]["next"]
+        assert ("The Dalles", 50) in LANDMARKS["Columbia River"]["next"]
+        assert ("Oregon City / Willamette Valley", 60) in LANDMARKS["Barlow Road"]["next"]
+
+    def test_stop_type_helpers_by_name(self):
+        world = WagonTrain()
+        # ELI5: these checks prove the stop labels were wired correctly.
+        assert world.is_fort_stop("Fort Kearny")
+        assert not world.is_fort_stop("Chimney Rock")
+
+        assert world.is_river_crossing_stop("Green River Crossing")
+        assert not world.is_river_crossing_stop("Fort Hall")
+
+        assert world.is_landmark_stop("Blue Mountains")
+        assert not world.is_landmark_stop("Soda Springs")
+
+        # Unknown names should fail safely (False, not crash).
+        assert not world.is_fort_stop("Not A Real Stop")
+
+    def test_current_location_type_helpers(self):
+        world = WagonTrain()
+
+        # Start of trail is Independence, not tagged fort/river/landmark.
+        assert world.current_or_last_stop == "Independence, Missouri"
+        assert not world.at_fort_stop
+        assert not world.at_river_crossing_stop
+        assert not world.at_landmark_stop
+
+        # At Fort Kearny miles, we should report fort context.
+        world.miles_traveled = 320
+        assert world.current_or_last_stop == "Fort Kearny"
+        assert world.at_fort_stop
+
+        # At Green River miles, we should report river crossing context.
+        world.miles_traveled = 989
+        assert world.current_or_last_stop == "Green River Crossing"
+        assert world.at_river_crossing_stop
+
+        # At Blue Mountains miles, we should report landmark context.
+        world.miles_traveled = 1700
+        assert world.current_or_last_stop == "Blue Mountains"
+        assert world.at_landmark_stop
 
     def test_is_finished_on_days(self):
         world = WagonTrain()
