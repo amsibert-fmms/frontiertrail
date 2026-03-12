@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from datetime import date, timedelta
 from enum import Enum
 from typing import Dict, List, Tuple
 
@@ -169,12 +170,17 @@ class WagonTrain:
     # if we know our goal and max days, we can estimate whether we are
     # "on pace" or "behind pace" as the trip unfolds.
     REQUIRED_MILES_PER_DAY = GOAL_MILES / MAX_DAYS
+    START_MONTH = 3
+    START_DAY = 1
+    START_YEAR_MIN = 1840
+    START_YEAR_MAX = 1860
 
     def __init__(
         self,
         food_supply: float = 500.0,
         wagon_parts: float = 100.0,
         weather: Weather = Weather.SUNNY,
+        start_year: int | None = None,
     ) -> None:
         self.day: int = 0
         self.miles_traveled: float = 0.0
@@ -194,6 +200,26 @@ class WagonTrain:
         self.river_ahead: bool = False
         self._days_until_river: int = random.randint(5, 15)
         self._event_log: List[str] = []    # events that happened today
+
+        # Calendar model for log readability:
+        # - Every run starts on March 1st (as requested).
+        # - The year is intentionally randomized to keep each run feeling like
+        #   a distinct historical departure while staying in the requested era.
+        # - `start_year` is optional so tests/harnesses can force determinism.
+        resolved_year = (
+            start_year
+            if start_year is not None
+            else random.randint(self.START_YEAR_MIN, self.START_YEAR_MAX)
+        )
+        if not self.START_YEAR_MIN <= resolved_year <= self.START_YEAR_MAX:
+            raise ValueError(
+                "start_year must be between "
+                f"{self.START_YEAR_MIN} and {self.START_YEAR_MAX}, got {resolved_year}"
+            )
+        self.start_date = date(resolved_year, self.START_MONTH, self.START_DAY)
+        # Day 0 is a setup state before play starts; Day 1 should render as
+        # March 1st, so we derive current_date from day count in advance_day().
+        self.current_date = self.start_date
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -289,6 +315,7 @@ class WagonTrain:
     def advance_day(self) -> None:
         """Tick the calendar and update persistent world state."""
         self.day += 1
+        self.current_date = self.start_date + timedelta(days=self.day - 1)
         self._event_log = []
 
         # Evolve weather
@@ -344,11 +371,20 @@ class WagonTrain:
     def summary(self) -> str:
         river_str = " [RIVER AHEAD]" if self.river_ahead else ""
         return (
-            f"Day {self.day:>3} | Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
+            f"Day {self.day:>3} ({self.current_date.strftime('%b %d, %Y')}) | "
+            f"Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
             f"Food: {self.food_supply:>5.1f} | Parts: {self.wagon_parts:>5.1f} | "
             f"Weather: {self.weather.value:<7} | Morale: {self.morale:>4.0f} | "
             f"Next: {self.next_landmark}{river_str}"
         )
+
+    @property
+    def is_sunday(self) -> bool:
+        """Return True when the simulation date is Sunday.
+
+        ELI5: Python weekday numbering uses Monday=0 ... Sunday=6.
+        """
+        return self.current_date.weekday() == 6
 
     @property
     def miles_needed_per_remaining_day(self) -> float:

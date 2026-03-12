@@ -26,9 +26,9 @@ def build_default_party() -> List[Agent]:
         Agent("Jesse Fox",     Role.SCOUT,     Traits(0.7, 0.4, 0.3, 0.5)),
         Agent("Mae Cooper",    Role.PASSENGER, Traits(0.4, 0.6, 0.5, 0.7)),
         Agent("Old Pete",      Role.PASSENGER, Traits(0.2, 0.5, 0.8, 0.4)),
+        Agent("Rev. Silas Boone", Role.PREACHER, Traits(0.2, 0.8, 0.7, 0.9)),
         Agent("Ruby Dalton",   Role.PASSENGER, Traits(0.5, 0.7, 0.4, 0.8)),
         Agent("Caleb Stone",   Role.HUNTER,    Traits(0.7, 0.3, 0.6, 0.4)),
-        Agent("Nora Wells",    Role.PASSENGER, Traits(0.4, 0.8, 0.3, 0.9)),
     ]
     return party
 
