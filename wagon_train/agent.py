@@ -222,17 +222,32 @@ class Agent:
         """
         from .decisions import Action
 
+        # "Progress urgency" tells us how many miles/day we now need.
+        # If this climbs above the baseline required pace, we are behind schedule.
         progress_urgency = world.miles_needed_per_remaining_day
+        behind_schedule_ratio = progress_urgency / max(0.1, world.REQUIRED_MILES_PER_DAY)
+
         # Each low-progress day should make movement actions more appealing.
-        # This gives us a smooth, accumulating "we're stalling" pressure.
-        stall_pressure = min(8.0, world.low_progress_streak * 1.2)
+        # ELI5: this is a "we are getting stuck" alarm that gets louder each day.
+        stall_pressure = min(9.0, world.low_progress_streak * 1.35)
+
+        # Non-travel pressure applies only when behind schedule.
+        # ELI5: if we are late, we put a small "cost" on actions that do not move us.
+        # This is intentionally capped so survival actions can still win when truly needed.
+        non_travel_pressure = min(3.0, max(0.0, behind_schedule_ratio - 1.0) * 2.0 + world.low_progress_streak * 0.18)
+
         score_map = {
-            Action.TRAVEL: 5.0 + min(8.0, progress_urgency * 0.8) + stall_pressure,
-            Action.REST: 2.0 + (4.0 if self._health < 50 else 0.0),
-            Action.HUNT: 2.5 + (4.5 if world.food_supply < 25 else 0.0),
-            Action.REPAIR_WAGON: 2.5 + (4.0 if world.wagon_parts < 30 else 0.0),
-            Action.RATION_FOOD: 1.5 + (3.5 if world.food_supply < 20 else 0.0),
-            Action.FORD_RIVER: 4.0 + (2.0 if world.river_ahead else -3.0) + stall_pressure,
+            # Travel and ford are the two direct progress actions, so they absorb
+            # the strongest boost from schedule pressure + stalling pressure.
+            Action.TRAVEL: 5.2 + min(8.8, progress_urgency * 0.9) + stall_pressure,
+            Action.FORD_RIVER: 4.2 + (2.2 if world.river_ahead else -3.0) + stall_pressure,
+
+            # Non-progress actions keep their survival/resource benefits,
+            # then receive a small late-schedule penalty.
+            Action.REST: (2.2 + (4.0 if self._health < 50 else 0.0)) - non_travel_pressure,
+            Action.HUNT: (2.6 + (4.6 if world.food_supply < 25 else 0.0)) - non_travel_pressure,
+            Action.REPAIR_WAGON: (2.5 + (4.0 if world.wagon_parts < 30 else 0.0)) - non_travel_pressure,
+            Action.RATION_FOOD: (1.6 + (3.7 if world.food_supply < 20 else 0.0)) - non_travel_pressure,
         }
         return score_map[action]
 
@@ -251,8 +266,10 @@ class Agent:
         # because travel itself cannot proceed until the crossing is resolved.
         # If we have stalled for several days, reduce the threshold so progress
         # bias kicks in earlier and the party breaks out of passive loops.
-        adaptive_pressure = min(0.35, world.low_progress_streak * 0.03)
-        must_travel_threshold = world.REQUIRED_MILES_PER_DAY * (1.2 - adaptive_pressure)
+        # Lower threshold a bit versus pass #1 so progress-bias engages sooner.
+        # ELI5: we do not wait as long to "switch into catch-up mode".
+        adaptive_pressure = min(0.40, world.low_progress_streak * 0.035)
+        must_travel_threshold = world.REQUIRED_MILES_PER_DAY * (1.15 - adaptive_pressure)
         behind_schedule = world.miles_needed_per_remaining_day >= must_travel_threshold
         if not behind_schedule:
             return base_action

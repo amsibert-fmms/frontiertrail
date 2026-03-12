@@ -46,9 +46,17 @@ REPAIR_PARTS_RESTORE = 20.0
 # Ration food reduces consumption but costs morale
 RATION_CONSUMPTION_FACTOR = 0.4   # 40 % of normal consumption
 
-# Health cost of fording a river (base range per person)
-FORD_HEALTH_COST_MIN = 4.0
-FORD_HEALTH_COST_MAX = 15.0
+# Health cost of fording a river (base range per person).
+# Tuning pass #1 narrows this band so a failed crossing is still scary
+# but less likely to cause an unrecoverable full-party spiral.
+FORD_HEALTH_COST_MIN = 3.0
+FORD_HEALTH_COST_MAX = 10.0
+
+# River risk model constants.
+# ELI5: crossing always has danger, but scouts should noticeably lower that danger.
+FORD_RISK_BASE = 0.5
+FORD_RISK_PER_SCOUT_REDUCTION = 0.1
+FORD_RISK_FLOOR = 0.08
 
 # Miles gained when fording
 FORD_MILES = 12.0
@@ -246,10 +254,18 @@ class DecisionEngine:
             return msgs
 
         msgs.append("The party attempts to ford the river!")
-        # Risk varies; scouts reduce danger
+        # Risk varies; scouts reduce danger.
+        #
+        # ELI5:
+        # - Start with a baseline crossing danger (FORD_RISK_BASE).
+        # - Each scout trims that danger a little bit.
+        # - Keep a floor so crossings are never perfectly safe.
         from .agent import Role
         scouts = [a for a in living if a.role == Role.SCOUT]
-        risk = max(0.1, 0.6 - len(scouts) * 0.1)
+        risk = max(
+            FORD_RISK_FLOOR,
+            FORD_RISK_BASE - len(scouts) * FORD_RISK_PER_SCOUT_REDUCTION,
+        )
 
         if random.random() < risk:
             # Bad crossing

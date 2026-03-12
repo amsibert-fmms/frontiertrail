@@ -1,128 +1,87 @@
 # Chances, Formulas, and Outcome Review (Current Build)
 
-This review re-checks the **current** simulation formulas and probabilities using fresh Monte Carlo runs, then suggests targeted tuning changes.
+This document now includes **tuning pass #2 (decision-policy progress pressure)** and compares pass #1 vs pass #2 using the same seeds/harness.
 
-## Outcome snapshot (what happens right now)
+## What was changed in pass #2
 
-I ran two sweeps:
+Implemented in `wagon_train/agent.py`:
 
-1. **500 full runs** (`Simulation(seed=i).run()` for `i=0..499`) to measure win/survival outcomes.
-2. **300 instrumented runs** (manual daily loop) to measure event frequency and action mix.
+- Increased progress weighting in `_action_score` for `TRAVEL` and `FORD_RIVER`.
+- Added bounded **non-travel pressure** when behind schedule, which slightly lowers scores for `REST`, `HUNT`, `REPAIR_WAGON`, and `RATION_FOOD`.
+- Increased stall sensitivity (`low_progress_streak`) in action scoring.
+- Lowered progress-bias trigger threshold in `_apply_progress_bias` so catch-up mode engages earlier.
 
-Observed outcomes:
-
-- Win rate: **22.4%** (112 / 500)
-- Average end miles: **1515.9**
-- Median end miles: **1484.0**
-- Average run length: **165.5 days**
-- Average survivors on wins: **6.78**
-- End states (300-run instrumented sweep):
-  - **Win: 80**
-  - **Timeout: 150**
-  - **All dead: 70**
-
-Interpretation: the game is now *winnable* (good), but still leans punishing, with many runs timing out or collapsing late.
+Design intent: reduce timeout drift without disabling survival actions in critical states.
 
 ---
 
-## Formula and chance review
+## Measurement method (unchanged)
 
-## 1) Event pressure is calibrated reasonably, but severe health shocks still snowball
+For both baseline (pass #1 code) and pass #2 code, I ran:
 
-### Current formulas
-- Daily event chance: `BASE_EVENT_CHANCE = 0.22`
-- Weighted selection by severity, with anti-streak suppression for back-to-back severe negatives.
-
-### Measured outcome
-- Realized event-day rate over 300 runs: **21.9%** (very close to target).
-
-### Improvement suggestions
-- Keep event rate at `0.22`.
-- Soften *group-wide* health hits on severe disease events (e.g., reduce `-20` to `-12..-16` on cholera/dysentery style events).
-- Keep single-target danger events (snake bite) for drama, but reduce frequency of events that damage **everyone at once**.
-
-Why: wipe-style health attrition is a major driver of all-dead endings.
-
-## 2) River crossing risk is still too costly for how often it appears
-
-### Current formulas
-- Ford risk: `max(0.1, 0.6 - 0.1 * scouts)`.
-- Default party has 1 scout ⇒ failure risk near **0.5**.
-- Failed ford applies random per-agent health loss + food loss + morale hit.
-
-### Measured outcome
-- Observed ford failure rate: **50.8%** (1692 attempts).
-
-### Improvement suggestions
-- Shift risk curve down slightly (example: `0.5 - 0.1 * scouts`, floor `0.08`).
-- Narrow failure health loss band (example: `3..10` instead of `4..15`).
-- Add a small positive reward for safe crossing beyond morale (already includes parts +2, which is good).
-
-Why: river outcomes currently feel close to coin flips with very asymmetric downside.
-
-## 3) Action selection over-indexes on maintenance actions
-
-### Measured action mix (300-run instrumented sweep)
-- Hunt: **15,931**
-- Travel: **15,728**
-- Rest: **15,435**
-- Ford: **1,692**
-- Ration: **447**
-- Repair: **272**
-
-### Interpretation
-The top 3 actions are almost evenly split. That means progress actions are not dominating enough to consistently hit 2000 miles by day 200, which explains the high timeout count.
-
-### Improvement suggestions
-- Increase schedule-pressure bias slightly in decision scoring when behind pace.
-- Introduce a mild “consecutive non-travel day” penalty to action scores (except during critical survival states).
-- Consider small passive recovery on travel days for high-morale parties, so travel does not always feel strictly worse than rest/hunt loops.
-
-## 4) Travel pacing is close, but still vulnerable to drift
-
-### Current formulas
-- `TRAVEL_BASE_MILES = 32`
-- Weather and wagon-parts multipliers can push daily progress down heavily in bad conditions.
-
-### Improvement suggestions
-- Keep base travel at 32 for now.
-- Add a tiny guaranteed floor on travel-day miles (example: minimum 8–10 miles unless blocked by river).
-- Optionally reduce extreme weather drag (`stormy` from `0.4` to `0.45`) if timeout rate remains high after decision-tuning.
-
-Why: many near-miss runs likely fail because cumulative bad-weather sequences erase progress pace.
+1. **500 full runs** (`Simulation(seed=i).run()` for `i=0..499`).
+2. **300 instrumented runs** (`seed=10000..10299`) with counters on:
+   - `EventSystem.roll`
+   - `DecisionEngine.resolve`
+   - `DecisionEngine.apply_action`
 
 ---
 
-## Recommended tuning order (small, safe iterations)
+## Pass #1 (baseline) vs Pass #2
 
-1. **River risk softening** (highest pain for least design disruption).
-2. **Decision-policy nudge toward progress** when behind schedule.
-3. **Severe group-health event softening** to reduce full-party wipeouts.
-4. Re-run 500-seed sweep and compare against targets.
+### 500-run outcomes
 
-## Updated target metrics
+| Metric | Pass #1 baseline | Pass #2 | Delta |
+|---|---:|---:|---:|
+| Win rate | 27.6% | 27.4% | -0.2 pp |
+| Timeout rate | 52.6% | 51.8% | -0.8 pp |
+| All-dead rate | 19.8% | 20.8% | +1.0 pp |
+| Avg end miles | 1590.1 | 1592.7 | +2.6 |
+| Median end miles | 1594.5 | 1602.5 | +8.0 |
+| Avg run length (days) | 164.3 | 163.6 | -0.6 |
+| Avg survivors on wins | 6.95 | 6.95 | ~0 |
 
-After the next tuning pass, aim for:
+### 300-run instrumented outcomes
 
-- Win rate: **30–40%**
-- Timeout rate: **<45%**
-- All-dead rate: **<15–18%**
-- Survivors on wins: **5–8 average**
+| Metric | Pass #1 baseline | Pass #2 | Delta |
+|---|---:|---:|---:|
+| Event-day rate | 21.79% | 21.76% | -0.03 pp |
+| Ford attempts | 1674 | 1703 | +29 |
+| Ford failures | 660 | 675 | +15 |
+| Ford failure rate | 39.43% | 39.64% | +0.21 pp |
 
-These targets should preserve challenge while reducing “unrecoverable spiral” runs.
+Action mix (pass #1 → pass #2):
+
+- Travel: `15671 -> 15842` (up)
+- Hunt: `15958 -> 15985` (flat)
+- Rest: `14852 -> 14673` (down)
+- Ford: `1674 -> 1703` (up)
+- Repair: `254 -> 250` (slightly down)
+- Ration: `483 -> 433` (down)
 
 ---
 
-## Implemented improvements in this pass
+## Interpretation
 
-- Added a startup prompt for party size when running `main.py` (with a `--party-size` override for non-interactive use).
-- Wagon-break events now assign an urgent repair owner (prefers mechanic), so repair pressure is explicitly represented in decisions.
-- Added day-by-day low-progress streak tracking and fed that into agent decision scoring so travel/ford urgency grows when the group stalls.
-- Removed backward movement behavior from negative mileage events (no event can subtract miles traveled anymore).
-- Increased morale sensitivity to stalling, hunger, poor health, poor wagon condition, and adverse weather.
+What improved:
 
-## Next suggestions after this implementation
+- Progress behavior moved in the intended direction (more travel/ford, less rest).
+- Timeout rate and median miles improved slightly.
 
-- Re-run 500-seed and 1000-seed sweeps to quantify the effect of stronger morale pressure on death vs timeout outcomes.
-- If death rate rises too much, soften only health-linked morale penalty before touching travel pace.
-- Consider one role-aware mitigation: medic can reduce morale loss from sickness-related event days.
+What did not improve enough:
+
+- Win rate remained effectively flat.
+- All-dead rate rose by ~1 percentage point.
+
+Risk note:
+
+- This suggests pass #2 added pace pressure successfully, but likely pushed some runs into lower-margin survival states. It is **not** a good idea to keep increasing pressure blindly; that may trade timeouts for deaths without raising wins.
+
+---
+
+## Recommended next pass (safe, constrained)
+
+1. Keep pass #1 + pass #2 changes.
+2. Add a **small travel-day minimum progress floor** on non-river travel days (e.g., 8–10 miles).
+3. Add a tiny safety valve for high-risk survival states (e.g., if avg health is low, dampen non-travel pressure slightly).
+4. Re-run the same 500/300 harness for direct comparison.
