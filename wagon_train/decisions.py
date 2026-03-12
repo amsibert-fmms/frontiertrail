@@ -214,7 +214,10 @@ class DecisionEngine:
         # - New model keeps a floor so the party is slowed, not frozen.
         # - We also cap top-end bonus to keep things predictable.
         parts_factor = min(1.2, 0.5 + world.wagon_parts / 100.0)
-        miles = TRAVEL_BASE_MILES * modifier * parts_factor
+        # Draft-animal power directly affects mobility.
+        # ELI5: fewer pull animals means the same wagon moves slower.
+        animal_factor = world.draft_power_multiplier
+        miles = TRAVEL_BASE_MILES * modifier * parts_factor * animal_factor
         miles *= random.uniform(0.8, 1.2)  # ±20% random variation
         world.miles_traveled += miles
         # Track speed for derived metric (rolling 7-day window)
@@ -579,9 +582,29 @@ class DecisionEngine:
 
         if world.food_supply <= 0:
             msgs.append("The food supply is exhausted! Everyone is starving.")
-            for agent in living:
-                agent.hunger = min(100.0, agent.hunger + 15.0)
-                agent.health -= 10.0
+
+            # Emergency starvation behavior: slaughter one draft animal for meat.
+            # ELI5: this saves lives now, but hurts travel speed later.
+            slaughter_result = world.slaughter_draft_animal_for_food()
+            if slaughter_result is not None:
+                animal_type, meat_lbs = slaughter_result
+                world.food_supply += meat_lbs
+                msgs.append(
+                    f"Emergency slaughter: one {animal_type} butchered for {meat_lbs:.1f} lbs of meat. "
+                    "Mobility will suffer from the lost draft power."
+                )
+                # Important balancing nuance:
+                # ELI5: they *were* starving this morning, but by evening they
+                # now have fresh meat. So we apply a smaller same-day penalty
+                # than a full no-food day.
+                for agent in living:
+                    agent.hunger = min(100.0, agent.hunger + 5.0)
+                    agent.health -= 2.0
+            else:
+                # True no-food day with no slaughter fallback remains severe.
+                for agent in living:
+                    agent.hunger = min(100.0, agent.hunger + 15.0)
+                    agent.health -= 10.0
         else:
             for agent in living:
                 agent.hunger = max(0.0, agent.hunger - FOOD_PER_PERSON_PER_DAY * factor * 5)

@@ -182,6 +182,11 @@ class WagonTrain:
         self,
         food_supply: float = 500.0,
         wagon_parts: float = 100.0,
+        # ELI5: we slightly increased default oxen so one emergency slaughter
+        # is painful but does not immediately cripple long-term travel.
+        oxen_count: int = 8,
+        horse_count: int = 2,
+        mule_count: int = 2,
         weather: Weather = Weather.SUNNY,
         start_year: int | None = None,
     ) -> None:
@@ -189,6 +194,16 @@ class WagonTrain:
         self.miles_traveled: float = 0.0
         self.food_supply: float = food_supply
         self.wagon_parts: float = wagon_parts
+        # Draft-animal resources are critical to both mobility and emergency food.
+        # ELI5: these are the "engines" of the wagon in this era.
+        self.oxen_count: int = max(0, oxen_count)
+        self.horse_count: int = max(0, horse_count)
+        self.mule_count: int = max(0, mule_count)
+        # Keep an initial snapshot so mobility is measured against the
+        # configured starting team, not hardcoded defaults.
+        self._initial_oxen_count: int = self.oxen_count
+        self._initial_horse_count: int = self.horse_count
+        self._initial_mule_count: int = self.mule_count
         self.weather: Weather = weather
         self.morale: float = 80.0          # group morale (0-100)
         self.sickness_events: List[str] = []
@@ -239,6 +254,62 @@ class WagonTrain:
     @property
     def travel_modifier(self) -> float:
         return WEATHER_TRAVEL_MODIFIER[self.weather]
+
+    @property
+    def draft_animal_count(self) -> int:
+        """Return total number of remaining draft animals."""
+        return self.oxen_count + self.horse_count + self.mule_count
+
+    @property
+    def draft_power_multiplier(self) -> float:
+        """Return a mobility multiplier derived from draft-animal power.
+
+        ELI5:
+        - Oxen are slow but very strong pullers, so they count the most.
+        - Horses are faster but weaker under heavy load, so medium weight.
+        - Mules are reliable but smaller, so lower weight.
+        - We clamp to a floor so movement degrades, but does not instantly freeze.
+        """
+        # Weights tuned so losing oxen still matters most, but horse/mule teams
+        # can keep the wagon moving at a viable pace.
+        weighted_power = (
+            self.oxen_count * 1.0
+            + self.horse_count * 0.98
+            + self.mule_count * 0.95
+        )
+        baseline_power = (
+            self._initial_oxen_count * 1.0
+            + self._initial_horse_count * 0.98
+            + self._initial_mule_count * 0.95
+        )
+        # If a scenario starts with no animals, treat multiplier as the
+        # minimum fallback to avoid division by zero.
+        if baseline_power <= 0:
+            return 0.75
+
+        # Floor is intentionally higher than before to avoid all runs stalling
+        # into unwinnable states after repeated starvation slaughters.
+        return max(0.75, weighted_power / baseline_power)
+
+    def slaughter_draft_animal_for_food(self) -> tuple[str, float] | None:
+        """Convert one draft animal into emergency food if any remain.
+
+        Priority is oxen first (largest meat yield), then horse, then mule.
+        Returns (animal_type, meat_lbs) when slaughter happens, else None.
+        """
+        if self.oxen_count > 0:
+            self.oxen_count -= 1
+            meat_lbs = random.uniform(400.0, 600.0)
+            return ("ox", meat_lbs)
+        if self.horse_count > 0:
+            self.horse_count -= 1
+            meat_lbs = random.uniform(250.0, 400.0)
+            return ("horse", meat_lbs)
+        if self.mule_count > 0:
+            self.mule_count -= 1
+            meat_lbs = random.uniform(200.0, 350.0)
+            return ("mule", meat_lbs)
+        return None
 
     @property
     def is_finished(self) -> bool:
@@ -420,13 +491,11 @@ class WagonTrain:
         food_days = self.food_days_remaining
         food_days_str = f"{food_days:.1f}d" if food_days != float("inf") else "---"
         return (
-            f"Day {self.day:>3} | Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
-            f"Food: {self.food_supply:>5.1f} ({food_days_str}) | "
-            f"Parts: {self.wagon_parts:>5.1f} ({self.wagon_condition*100:.0f}%) | "
-            f"Weather: {self.weather.value:<7} | Morale: {self.morale:>4.0f}{river_str}"
             f"Day {self.day:>3} ({self.current_date.strftime('%b %d, %Y')}) | "
             f"Miles: {self.miles_traveled:>6.1f}/{self.GOAL_MILES} | "
-            f"Food: {self.food_supply:>5.1f} | Parts: {self.wagon_parts:>5.1f} | "
+            f"Food: {self.food_supply:>5.1f} ({food_days_str}) | "
+            f"Parts: {self.wagon_parts:>5.1f} ({self.wagon_condition*100:.0f}%) | "
+            f"Animals: O{self.oxen_count}/H{self.horse_count}/M{self.mule_count} | "
             f"Weather: {self.weather.value:<7} | Morale: {self.morale:>4.0f} | "
             f"Next: {self.next_landmark}{river_str}"
         )

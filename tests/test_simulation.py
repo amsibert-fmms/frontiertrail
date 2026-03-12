@@ -240,6 +240,27 @@ class TestWagonTrain:
         assert world.food_supply == 500.0
         assert world.wagon_parts == 100.0
         assert world.morale == 80.0
+        # ELI5: default team starts with a full set of pull animals.
+        assert world.oxen_count == 8
+        assert world.horse_count == 2
+        assert world.mule_count == 2
+
+    def test_summary_includes_animals_and_day_header_once(self):
+        world = WagonTrain(start_year=1848)
+        world.advance_day()
+        summary = world.summary()
+        # Regression check: "Day" header should only appear once.
+        assert summary.count("Day") == 1
+        assert "Animals: O" in summary
+
+    def test_slaughter_draft_animal_prefers_oxen(self):
+        world = WagonTrain(oxen_count=1, horse_count=1, mule_count=1)
+        slaughter = world.slaughter_draft_animal_for_food()
+        assert slaughter is not None
+        animal_type, meat_lbs = slaughter
+        assert animal_type == "ox"
+        assert 400.0 <= meat_lbs <= 600.0
+        assert world.oxen_count == 0
 
     def test_advance_day_increments_day(self):
         world = WagonTrain()
@@ -642,6 +663,34 @@ class TestDecisionEngine:
         # After ration, food supply should be higher (less consumed)
         assert world1.food_supply >= world2.food_supply
 
+    def test_starvation_triggers_emergency_slaughter_and_refills_food(self):
+        engine = DecisionEngine()
+        world = WagonTrain(food_supply=0.0, oxen_count=1, horse_count=0, mule_count=0)
+        party = [Agent("A", Role.PASSENGER, Traits())]
+
+        msgs = engine._consume_food(party, world, Action.TRAVEL)
+
+        assert any("Emergency slaughter" in m for m in msgs)
+        assert world.oxen_count == 0
+        assert world.food_supply > 0.0
+
+    def test_travel_speed_drops_when_draft_animals_are_lost(self):
+        engine = DecisionEngine()
+        party = [Agent("A", Role.PASSENGER, Traits())]
+        world_with_animals = WagonTrain(oxen_count=6, horse_count=2, mule_count=2)
+        world_without_animals = WagonTrain(oxen_count=0, horse_count=0, mule_count=0)
+        world_with_animals.weather = Weather.SUNNY
+        world_without_animals.weather = Weather.SUNNY
+
+        random.seed(123)
+        msgs_full = engine._do_travel(party, world_with_animals, len(party))
+        random.seed(123)
+        msgs_reduced = engine._do_travel(party, world_without_animals, len(party))
+
+        assert world_without_animals.miles_traveled < world_with_animals.miles_traveled
+        assert any("travels" in m for m in msgs_full)
+        assert any("travels" in m for m in msgs_reduced)
+
     def test_repair_clears_urgent_repair_assignment(self):
         engine = DecisionEngine()
         world = WagonTrain()
@@ -790,6 +839,28 @@ class TestEventSystem:
         es.BASE_EVENT_CHANCE = 1.0
         es.roll(world, party)
         assert world.urgent_repair_assignee == "Mechanic"
+
+    def test_injured_animal_event_reduces_draft_animal_count(self):
+        es = EventSystem()
+        world = WagonTrain(oxen_count=1, horse_count=0, mule_count=0)
+        party = [Agent("Passenger", Role.PASSENGER, Traits())]
+        synthetic = {
+            "name": "Synthetic Injured Animal",
+            "description": "Testing draft animal attrition.",
+            "food_delta": 0,
+            "parts_delta": 0,
+            "health_delta": 0,
+            "morale_delta": 0,
+            "sickness": False,
+            "injure_draft_animal": True,
+            # Force deterministic permanent loss for this test.
+            "injure_draft_animal_loss_chance": 1.0,
+        }
+        es._choose_event = lambda: synthetic  # type: ignore[method-assign]
+        es.BASE_EVENT_CHANCE = 1.0
+        messages = es.roll(world, party)
+        assert world.oxen_count == 0
+        assert any("future travel speed is reduced" in msg for msg in messages)
 
 
 # ---------------------------------------------------------------------------
