@@ -225,13 +225,33 @@ class DecisionEngine:
             outcomes.extend(self._do_ford(living, world, n))
 
         elif action == Action.WAIT_AT_RIVER:
-            outcomes.extend(self._do_wait_river(living, world, n))
+            if not world.enable_crossing_logistics:
+                # ELI5: with the feature switch off, we collapse river choices
+                # back to the legacy single-action flow.
+                outcomes.append(
+                    "Crossing logistics feature is disabled; the party attempts a standard ford instead."
+                )
+                outcomes.extend(self._do_ford(living, world, n))
+            else:
+                outcomes.extend(self._do_wait_river(living, world, n))
 
         elif action == Action.CAULK_WAGON:
-            outcomes.extend(self._do_caulk(living, world, n))
+            if not world.enable_crossing_logistics:
+                outcomes.append(
+                    "Crossing logistics feature is disabled; the party attempts a standard ford instead."
+                )
+                outcomes.extend(self._do_ford(living, world, n))
+            else:
+                outcomes.extend(self._do_caulk(living, world, n))
 
         elif action == Action.FERRY_ACROSS:
-            outcomes.extend(self._do_ferry(living, world, n))
+            if not world.enable_crossing_logistics:
+                outcomes.append(
+                    "Crossing logistics feature is disabled; the party attempts a standard ford instead."
+                )
+                outcomes.extend(self._do_ford(living, world, n))
+            else:
+                outcomes.extend(self._do_ferry(living, world, n))
         # Sunday-rest rule:
         # If the party works on Sunday, we allow it (no hard lock-out), but we
         # apply a half-rest penalty to represent missed recovery time.
@@ -359,29 +379,49 @@ class DecisionEngine:
         self, living: List["Agent"], world: "WagonTrain", n: int
     ) -> List[str]:
         msgs: List[str] = []
-        msgs.append("The party rests for the day, recovering strength.")
 
-        # Medic-assisted healing bonus:
-        # ELI5: medics make every rest day a little more effective at recovery.
+        # ELI5 rest model requested by product direction:
+        # - Every day the party chooses to GO (travel/work action) or STAY (rest action).
+        # - If they STAY on Sunday, that is a full true rest day.
+        # - If they STAY on any other day, it is half rest + half duty work.
+        # This keeps Sunday special while preserving practical camp chores.
+        full_rest_day = world.is_sunday
+        rest_fraction = 1.0 if full_rest_day else 0.5
+        duty_fraction = 0.0 if full_rest_day else 0.5
+
+        if full_rest_day:
+            msgs.append("The party stays in camp for a full Sunday rest day.")
+        else:
+            msgs.append(
+                "The party stays in camp: half-day rest and half-day duty work."
+            )
+
+        # Medic/cook influence still matters on rest days, but scales with
+        # the amount of actual rest time that happened today.
         from .agent import Role
         medics = [a for a in living if a.role == Role.MEDIC]
         cooks = [a for a in living if a.role == Role.COOK]
-        medic_heal_bonus = min(4.0, len(medics) * 1.0)
-        # ELI5: cooks improve rest recovery, but we cap this lower so medics stay
-        # the main healing specialists and rest remains a meaningful choice.
-        cook_recovery_bonus = min(1.6, len(cooks) * 0.7)
+        hunters = [a for a in living if a.role == Role.HUNTER]
+        wheelwrights = [a for a in living if a.role == Role.WHEELWRIGHT]
+        blacksmiths = [a for a in living if a.role == Role.BLACKSMITH]
+        hostlers = [a for a in living if a.role == Role.HOSTLER]
+
+        medic_heal_bonus = min(4.0, len(medics) * 1.0) * rest_fraction
+        cook_recovery_bonus = min(1.6, len(cooks) * 0.7) * rest_fraction
 
         for agent in living:
-            agent.health = min(
-                100.0,
-                agent.health + random.uniform(3.0, 8.0) + medic_heal_bonus + cook_recovery_bonus,
-            )
-            agent.morale = min(100.0, agent.morale + random.uniform(2.0, 5.0))
-        world.morale = min(100.0, world.morale + 3.0)
+            # ELI5: base recovery is smaller on non-Sunday camp days because
+            # travelers still spend half the day on chores/duty.
+            base_heal = random.uniform(3.0, 8.0) * rest_fraction
+            base_morale = random.uniform(2.0, 5.0) * rest_fraction
+            agent.health = min(100.0, agent.health + base_heal + medic_heal_bonus + cook_recovery_bonus)
+            agent.morale = min(100.0, agent.morale + base_morale)
+
+        world.morale = min(100.0, world.morale + (3.0 * rest_fraction))
 
         if medic_heal_bonus > 0.0:
             msgs.append(
-                "Medic care improves rest recovery: "
+                "Medic care improves camp recovery: "
                 f"+{medic_heal_bonus:.1f} bonus healing per traveler."
             )
 
@@ -390,6 +430,33 @@ class DecisionEngine:
                 "Cooks stretch warm meals and broths during camp rest: "
                 f"+{cook_recovery_bonus:.1f} extra healing per traveler."
             )
+
+        # Half-day duty gains (non-Sunday stay days only).
+        # ELI5: people with practical jobs can still produce small benefits even
+        # when the wagon does not travel.
+        if duty_fraction > 0.0:
+            duty_food = len(hunters) * FOOD_PER_PERSON_PER_DAY * duty_fraction
+            duty_repairs = (
+                len(wheelwrights) * 2.0
+                + len(blacksmiths) * 1.5
+            ) * duty_fraction
+            duty_morale = len(hostlers) * 0.8 * duty_fraction
+
+            if duty_food > 0.0:
+                world.food_supply += duty_food
+                msgs.append(
+                    f"Half-day hunting/foraging duty adds +{duty_food:.1f} lbs of food."
+                )
+            if duty_repairs > 0.0:
+                world.wagon_parts = min(100.0, world.wagon_parts + duty_repairs)
+                msgs.append(
+                    "Half-day maintenance duty recovers "
+                    f"+{duty_repairs:.1f} wagon parts."
+                )
+            if duty_morale > 0.0:
+                world.morale = min(100.0, world.morale + duty_morale)
+                msgs.append("Hostlers calm teams during camp duty work.")
+
         return msgs
 
     def _do_hunt(

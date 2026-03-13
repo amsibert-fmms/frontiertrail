@@ -2,6 +2,8 @@
 
 An environment for AI agents on the Oregon Trail.
 
+For additional curated historical notes from user-provided trail sources, see `HISTORICAL_SOURCES.md`.
+
 ## Historical Trail Background
 
 The country that lay ahead of the pioneers contained no towns or permanent settlements. For weeks, emigrants crossed vast grasslands that were hot by day and cold at night. Violent thunderstorms often swept down on travelers. Eventually, they crossed the snow-capped Rocky Mountains. Beyond the mountains lay a harsh wilderness of sagebrush desert, canyons, and forests.

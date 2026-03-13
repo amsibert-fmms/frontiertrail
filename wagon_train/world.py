@@ -261,6 +261,13 @@ class WagonTrain:
         weather: Weather = Weather.SUNNY,
         start_year: int | None = None,
         start_month: int | None = None,
+        # Feature flags (small rollout toggles):
+        # ELI5:
+        # - These switches let us turn new mechanics on/off safely.
+        # - "False" keeps classic behavior for compatibility.
+        # - "True" enables the historical realism hooks from the backlog.
+        enable_terrain_speed_modifiers: bool = False,
+        enable_crossing_logistics: bool = False,
     ) -> None:
         self.day: int = 0
         self.miles_traveled: float = 0.0
@@ -298,6 +305,11 @@ class WagonTrain:
         # ELI5: some stretches have newer bridges/ferries; this temporary bonus
         # lowers river danger for a few days when discovered.
         self.crossing_safety_days: int = 0
+
+        # Feature-flag storage.
+        # ELI5: these are plain booleans checked by agent/decision logic.
+        self.enable_terrain_speed_modifiers: bool = enable_terrain_speed_modifiers
+        self.enable_crossing_logistics: bool = enable_crossing_logistics
 
         # Derived-metric support
         self.living_count: int = 0         # updated by simulation each day
@@ -427,6 +439,12 @@ class WagonTrain:
         - 1.0 means no extra slowdown.
         - Smaller numbers mean slower progress for the same action.
         """
+        # Feature flag guard:
+        # ELI5: if this is disabled, terrain still has a name for logs,
+        # but it does not change speed yet.
+        if not self.enable_terrain_speed_modifiers:
+            return 1.0
+
         for _segment_name, start_mile, end_mile, speed_multiplier in TERRAIN_SPEED_SEGMENTS:
             if start_mile <= self.miles_traveled < end_mile:
                 return speed_multiplier
