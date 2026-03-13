@@ -316,6 +316,12 @@ class Agent:
         if not self.alive:
             return Action.REST
 
+        # Sunday preference rule:
+        # ELI5: on Sundays we default to rest unless warning signs say we are
+        # approaching a critical situation.
+        if self._should_prioritize_sunday_rest(world):
+            return Action.REST
+
         # Role-specific tendencies (use food_days_remaining for smarter forecasting)
         if self.role == Role.HUNTER and world.food_days_remaining < 5:
             # ELI5: hunters are our best chance to refill food quickly.
@@ -339,6 +345,8 @@ class Agent:
         if self.role == Role.SCOUT:
             # Scouts prefer travelling; choose crossing method based on risk tolerance
             if world.river_ahead:
+                if not world.enable_crossing_logistics:
+                    return self._river_action_when_logistics_disabled()
                 return self._scout_river_decision(world)
             return Action.TRAVEL
 
@@ -348,6 +356,17 @@ class Agent:
         # Generic decision based on traits
         base_action = self._generic_decision(world)
         return self._apply_progress_bias(world, base_action)
+
+    def _river_action_when_logistics_disabled(self) -> "Action":  # noqa: F821
+        """Return the legacy river action when logistics feature is off.
+
+        ELI5:
+        - Before the logistics hook, river handling was a simple choice.
+        - We keep that fallback so turning the feature flag off is predictable.
+        """
+        from .decisions import Action
+
+        return Action.FORD_RIVER
 
     def _scout_river_decision(self, world: "WagonTrain") -> "Action":  # noqa: F821
         """Scouts choose a river-crossing strategy based on risk tolerance."""
@@ -375,6 +394,9 @@ class Agent:
 
         # River decision
         if world.river_ahead:
+            if not world.enable_crossing_logistics:
+                return self._river_action_when_logistics_disabled()
+
             rt = self.traits.risk_tolerance
 
             if rt >= 0.6:
@@ -404,6 +426,9 @@ class Agent:
 
         # River decision based on risk tolerance
         if world.river_ahead:
+            if not world.enable_crossing_logistics:
+                return self._river_action_when_logistics_disabled()
+
             rt = self.traits.risk_tolerance
             if rt > 0.6:
                 return Action.FORD_RIVER
@@ -415,6 +440,38 @@ class Agent:
         if self._morale < 30:
             return Action.REST
         return Action.TRAVEL
+
+    def _approaching_critical_state(self, world: "WagonTrain") -> bool:  # noqa: F821
+        """Return True when important factors are trending toward danger.
+
+        ELI5:
+        - "Critical" means immediate danger right now.
+        - "Approaching critical" means not a fire yet, but smoke is rising.
+        - We use this especially for Sunday logic so rest is preferred unless
+          one of these warning lights is active.
+        """
+        return (
+            self._critical_survival_state(world)
+            # Food pressure is rising (even before true starvation).
+            or world.food_days_remaining <= 4.0
+            # Wagon reliability is getting shaky.
+            or world.wagon_parts < 30.0
+            # Multi-day illness pressure is a warning sign.
+            or world.sickness_count > 1
+            # Explicit urgent repair assignment means known serious damage.
+            or world.urgent_repair_assignee is not None
+            # If schedule pressure is very high, a full stop can be too costly.
+            or world.miles_needed_per_remaining_day > (world.REQUIRED_MILES_PER_DAY * 1.35)
+        )
+
+    def _should_prioritize_sunday_rest(self, world: "WagonTrain") -> bool:  # noqa: F821
+        """Return True when Sunday should default to REST.
+
+        ELI5:
+        - The design intent is "maximize rest on Sundays".
+        - We only skip that default when warning signs say action is needed.
+        """
+        return world.is_sunday and not self._approaching_critical_state(world)
 
     def _critical_survival_state(self, world: "WagonTrain") -> bool:  # noqa: F821
         """Return True when survival needs are urgent enough to override pacing.
@@ -499,6 +556,14 @@ class Agent:
             # Caulking is another river option with slight parts wear pressure.
             Action.CAULK_WAGON: (2.2 + (2.0 if world.river_ahead else -2.0) - (0.6 if world.wagon_parts < 20 else 0.0)),
         }
+
+        # Feature flag guard for crossing logistics:
+        # ELI5: when disabled, we strongly discourage the newer river actions so
+        # legacy ford behavior wins naturally.
+        if not world.enable_crossing_logistics:
+            score_map[Action.WAIT_AT_RIVER] -= 8.0
+            score_map[Action.FERRY_ACROSS] -= 8.0
+            score_map[Action.CAULK_WAGON] -= 8.0
         return score_map[action]
 
     def _apply_progress_bias(self, world: "WagonTrain", base_action: "Action") -> "Action":  # noqa: F821
@@ -525,6 +590,8 @@ class Agent:
             return base_action
 
         preferred_progress_action = Action.FORD_RIVER if world.river_ahead else Action.TRAVEL
+        # ELI5: when logistics is off, fancy river options should not compete
+        # with the legacy progress action.
         if self._action_score(world, preferred_progress_action) >= self._action_score(world, base_action):
             return preferred_progress_action
         return base_action

@@ -234,6 +234,31 @@ class TestAgent:
         cook = Agent("Rev", Role.COOK, Traits(0.5, 0.5, 0.5, 0.5), health=95.0, morale=80.0)
         assert cook.role == Role.COOK
 
+
+    def test_sunday_defaults_to_rest_when_not_approaching_critical(self):
+        # ELI5: design says Sunday should maximize rest unless warning lights
+        # are active. In a stable situation, action should be REST.
+        world = WagonTrain(start_year=1848, start_month=4)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+
+        traveler = Agent("Traveler", Role.PASSENGER, Traits(0.6, 0.5, 0.5, 0.5), morale=70.0)
+        assert traveler.propose_action(world) == Action.REST
+
+    def test_sunday_can_override_rest_when_approaching_critical(self):
+        # ELI5: Sunday rest is default, not absolute. If food pressure is near
+        # critical, agents should be allowed to work (e.g., hunt).
+        world = WagonTrain(start_year=1848, start_month=4)
+        world.advance_day()
+        while not world.is_sunday:
+            world.advance_day()
+
+        world.food_supply = 20.0
+        world.living_count = 8
+        hunter = Agent("Hunter", Role.HUNTER, Traits(0.7, 0.5, 0.5, 0.5), morale=70.0)
+        assert hunter.propose_action(world) == Action.HUNT
+
     def test_agents_start_with_route_destination_intent(self):
         # ELI5: each traveler starts with a destination in mind before voting.
         traveler = Agent("Traveler", Role.PASSENGER, Traits(0.6, 0.5, 0.5, 0.5))
@@ -463,7 +488,9 @@ class TestWagonTrain:
         assert world.travel_modifier < 1.0
 
     def test_terrain_speed_modifier_uses_segment_ranges(self):
-        world = WagonTrain()
+        # ELI5: this test validates the terrain hook itself, so we
+        # explicitly enable the terrain feature flag.
+        world = WagonTrain(enable_terrain_speed_modifiers=True)
 
         # ELI5: right after starting, we are in plains terrain.
         world.miles_traveled = 10.0
@@ -484,6 +511,20 @@ class TestWagonTrain:
         world.miles_traveled = 1750.0
         assert world.terrain_segment_name == "forests"
         assert world.terrain_speed_modifier == pytest.approx(0.9)
+
+
+    def test_terrain_feature_flag_can_disable_speed_penalty(self):
+        # ELI5: the terrain map still identifies mountains/desert, but if the
+        # feature flag is OFF we should apply no speed slowdown yet.
+        world = WagonTrain(enable_terrain_speed_modifiers=False)
+        world.miles_traveled = 950.0
+        assert world.terrain_segment_name == "mountains"
+        assert world.terrain_speed_modifier == pytest.approx(1.0)
+
+        # ELI5: turning the flag ON enables the historical slowdown hook.
+        enabled_world = WagonTrain(enable_terrain_speed_modifiers=True)
+        enabled_world.miles_traveled = 950.0
+        assert enabled_world.terrain_speed_modifier == pytest.approx(0.82)
 
     def test_terrain_segments_do_not_overlap_and_cover_positive_miles(self):
         # ELI5: this protects against misconfigured segment tables.
@@ -584,6 +625,61 @@ class TestDecisionEngine:
         avg_health = sum(a.health for a in party) / len(party)
         assert avg_health > 50.0
 
+
+    def test_terrain_feature_flag_changes_travel_distance(self, monkeypatch):
+        # ELI5: same setup, same random draw.
+        # - With terrain flag OFF: no terrain slowdown.
+        # - With terrain flag ON: mountainous segment should reduce miles.
+        engine = DecisionEngine()
+        party = self._make_party()
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+
+        off_world = WagonTrain(enable_terrain_speed_modifiers=False)
+        off_world.weather = Weather.SUNNY
+        off_world.miles_traveled = 950.0
+        off_world.river_ahead = False
+        engine.apply_action(Action.TRAVEL, party, off_world)
+
+        on_world = WagonTrain(enable_terrain_speed_modifiers=True)
+        on_world.weather = Weather.SUNNY
+        on_world.miles_traveled = 950.0
+        on_world.river_ahead = False
+        engine.apply_action(Action.TRAVEL, party, on_world)
+
+        # Compare only miles gained today, not absolute mile marker.
+        off_gain = off_world._recent_miles[-1]
+        on_gain = on_world._recent_miles[-1]
+        assert on_gain < off_gain
+
+    def test_crossing_logistics_feature_flag_fallbacks_to_ford(self):
+        # ELI5: if someone picks a fancy crossing action while the feature is
+        # OFF, the engine should fall back to classic ford behavior.
+        engine = DecisionEngine()
+        world = WagonTrain(enable_crossing_logistics=False)
+        world.river_ahead = True
+        party = self._make_party()
+
+        outcomes = engine.apply_action(Action.FERRY_ACROSS, party, world)
+
+        assert any("feature is disabled" in msg for msg in outcomes)
+        assert any("attempts to ford the river" in msg for msg in outcomes)
+
+    def test_crossing_logistics_feature_flag_enabled_uses_ferry(self, monkeypatch):
+        # ELI5: when the flag is ON, ferry should use ferry-specific behavior
+        # (safe crossing + food cost), not fallback ford messaging.
+        engine = DecisionEngine()
+        world = WagonTrain(enable_crossing_logistics=True)
+        world.river_ahead = True
+        world.food_supply = 100.0
+        party = self._make_party()
+
+        # Deterministic ferry cost.
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.FERRY_ACROSS, party, world)
+
+        assert any("ferry carries everyone safely" in msg for msg in outcomes)
+        assert not any("feature is disabled" in msg for msg in outcomes)
+
     def test_travel_passive_hunter_food_and_wheelwright_repairs_apply(self, monkeypatch):
         # ELI5: on travel days hunters should gather a little food and wheelwrights
         # should recover a little wagon condition without spending a full action.
@@ -614,7 +710,12 @@ class TestDecisionEngine:
     def test_rest_with_medic_increases_healing_rate(self, monkeypatch):
         # ELI5: medics should make each rest day heal more than non-medic rests.
         engine = DecisionEngine()
-        world = WagonTrain()
+        # ELI5: force both comparisons onto non-Sunday camp days so the only
+        # difference is medic presence, not Sunday full-rest rules.
+        world = WagonTrain(start_year=1848, start_month=4)
+        world.advance_day()
+        while world.is_sunday:
+            world.advance_day()
         with_medic = [
             Agent("Medic", Role.MEDIC, Traits(), health=50.0),
             Agent("Traveler", Role.PASSENGER, Traits(), health=50.0),
@@ -628,7 +729,10 @@ class TestDecisionEngine:
         engine.apply_action(Action.REST, with_medic, world)
         healed_with_medic = sum(a.health for a in with_medic) / len(with_medic)
 
-        world2 = WagonTrain()
+        world2 = WagonTrain(start_year=1848, start_month=4)
+        world2.advance_day()
+        while world2.is_sunday:
+            world2.advance_day()
         engine.apply_action(Action.REST, without_medic, world2)
         healed_without_medic = sum(a.health for a in without_medic) / len(without_medic)
 
@@ -656,6 +760,67 @@ class TestDecisionEngine:
         healed_without_cook = sum(a.health for a in without_cook) / len(without_cook)
 
         assert healed_with_cook > healed_without_cook
+
+
+    def test_rest_is_full_on_sunday_and_half_on_weekdays(self, monkeypatch):
+        # ELI5: same people and same random numbers.
+        # Sunday-rest should recover more than a weekday camp day.
+        engine = DecisionEngine()
+
+        sunday_world = WagonTrain(start_year=1848, start_month=4)
+        sunday_world.advance_day()
+        while not sunday_world.is_sunday:
+            sunday_world.advance_day()
+
+        weekday_world = WagonTrain(start_year=1848, start_month=4)
+        weekday_world.advance_day()
+        while weekday_world.is_sunday:
+            weekday_world.advance_day()
+
+        sunday_party = [
+            Agent("A", Role.PASSENGER, Traits(), health=50.0, morale=50.0),
+            Agent("B", Role.PASSENGER, Traits(), health=50.0, morale=50.0),
+        ]
+        weekday_party = [
+            Agent("A", Role.PASSENGER, Traits(), health=50.0, morale=50.0),
+            Agent("B", Role.PASSENGER, Traits(), health=50.0, morale=50.0),
+        ]
+
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        engine.apply_action(Action.REST, sunday_party, sunday_world)
+        engine.apply_action(Action.REST, weekday_party, weekday_world)
+
+        sunday_avg_health = sum(a.health for a in sunday_party) / len(sunday_party)
+        weekday_avg_health = sum(a.health for a in weekday_party) / len(weekday_party)
+        assert sunday_avg_health > weekday_avg_health
+
+    def test_weekday_rest_applies_half_day_duty_gains(self, monkeypatch):
+        # ELI5: on non-Sunday camp days, workers should still produce small
+        # food/repair benefits because only half the day is true rest.
+        engine = DecisionEngine()
+        world = WagonTrain(start_year=1848, start_month=4)
+        world.advance_day()
+        while world.is_sunday:
+            world.advance_day()
+
+        world.food_supply = 100.0
+        world.wagon_parts = 80.0
+        party = [
+            Agent("Hunter", Role.HUNTER, Traits(), health=50.0),
+            Agent("Wheel", Role.WHEELWRIGHT, Traits(), health=50.0),
+            Agent("Traveler", Role.PASSENGER, Traits(), health=50.0),
+        ]
+
+        monkeypatch.setattr(random, "uniform", lambda a, b: (a + b) / 2.0)
+        outcomes = engine.apply_action(Action.REST, party, world)
+
+        # Food was consumed at end-of-day, but duty should offset some loss.
+        # Baseline consumption for 3 people is 4.5 lbs.
+        # Hunter half-day duty adds 0.75 lbs, so expected net should be above 96.25.
+        assert world.food_supply >= 96.25
+        # Half-day wheelwright duty adds +1.0 parts.
+        assert world.wagon_parts >= 81.0
+        assert any("half-day" in msg.lower() for msg in outcomes)
 
     def test_travel_buys_supplies_at_fort_when_cash_available(self, monkeypatch):
         engine = DecisionEngine()
@@ -908,11 +1073,11 @@ class TestDecisionEngine:
 
         # ELI5: same people, same weather, same wagon condition.
         # Only terrain position changes, so miles should be lower in mountains.
-        plains_world = WagonTrain()
+        plains_world = WagonTrain(enable_terrain_speed_modifiers=True)
         plains_world.weather = Weather.SUNNY
         plains_world.miles_traveled = 100.0
 
-        mountains_world = WagonTrain()
+        mountains_world = WagonTrain(enable_terrain_speed_modifiers=True)
         mountains_world.weather = Weather.SUNNY
         mountains_world.miles_traveled = 1000.0
 
@@ -946,7 +1111,10 @@ class TestDecisionEngine:
 
     def test_wait_at_river_keeps_river_ahead(self):
         engine = DecisionEngine()
-        world = WagonTrain()
+        # ELI5: waiting should only stay-in-place when crossing logistics
+        # are enabled, because with the feature OFF we intentionally fallback
+        # to legacy fording behavior.
+        world = WagonTrain(enable_crossing_logistics=True)
         world.river_ahead = True
         party = self._make_party()
         engine.apply_action(Action.WAIT_AT_RIVER, party, world)
